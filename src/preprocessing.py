@@ -222,3 +222,119 @@ def detect_trim_bounds_rms_intersection(
         plt.show()
 
     return trim_start, trim_end
+
+def detect_trim_bounds_stairs(time, df_gravity, window_size=5, overlap=0.5,
+                              start_frac=0.3, end_frac=0.2, smooth=5, debug=False,
+                              out_dir=None, folder_name=None):
+    """
+    Detect and plot trim bounds for stairs activity using RMS of gravity signal.
+
+    Parameters
+    ----------
+    time : array-like
+        Time values (seconds_elapsed from Gravity.csv).
+    df_gravity : DataFrame
+        DataFrame with 'x','y','z' columns from Gravity.csv.
+    window_size : float
+        Window size in seconds for RMS calculation.
+    overlap : float
+        Fractional overlap between windows (0.5 = 50%).
+    start_frac : float
+        Fraction of peak RMS to mark activity start.
+    end_frac : float
+        Fraction of peak RMS to mark activity end.
+    smooth : int
+        Window size for moving average smoothing of RMS.
+    debug : bool
+        If True, generate summary plot.
+    out_dir : str
+        Path to save plot (inside trimmed_data/stairs/...).
+    folder_name : str
+        Current folder name for labeling/saving.
+
+    Returns
+    -------
+    trim_start, trim_end : float
+        Time values marking activity start and end.
+    """
+
+    # --- Compute overall magnitude of gravity ---
+    g_mag = np.sqrt(df_gravity["x"]**2 + df_gravity["y"]**2 + df_gravity["z"]**2)
+
+    # --- Sampling rate ---
+    sample_rate = len(time) / (time[-1] - time[0])
+    step = int(window_size * sample_rate)
+    stride = int(step * (1 - overlap))
+
+    # --- Compute RMS in windows ---
+    rms_vals, rms_times = [], []
+    for start in range(0, len(g_mag) - step, stride):
+        segment = g_mag[start:start+step]
+        rms_vals.append(np.sqrt(np.mean(segment**2)))
+        rms_times.append(time[start + step//2])
+
+    rms_vals = np.array(rms_vals)
+    rms_times = np.array(rms_times)
+
+    # --- Smooth RMS if needed ---
+    if smooth > 1 and len(rms_vals) >= smooth:
+        kernel = np.ones(smooth) / smooth
+        rms_vals = np.convolve(rms_vals, kernel, mode="same")
+
+    # --- Too few windows? fall back ---
+    if len(rms_vals) < 3:
+        return time[0], time[-1]
+
+    # --- Thresholding ---
+    peak = np.max(rms_vals)
+    start_thresh = start_frac * peak
+    end_thresh = end_frac * peak
+
+    try:
+        start_idx = np.where(rms_vals >= start_thresh)[0][0]
+    except IndexError:
+        start_idx = 0
+
+    try:
+        end_idx = np.where(rms_vals >= end_thresh)[0][-1]
+        if end_idx >= len(rms_times):
+            end_idx = len(rms_times) - 1
+    except IndexError:
+        end_idx = len(rms_times) - 1
+
+    trim_start = rms_times[start_idx]
+    trim_end = rms_times[end_idx]
+
+    # --- Debug / Summary plot ---
+    if debug:
+        plt.figure(figsize=(12,6))
+        # Plot raw gravity magnitude
+        plt.plot(time, g_mag, alpha=0.4, label="Gravity magnitude")
+
+        # Plot RMS curve
+        plt.plot(rms_times, rms_vals, label="RMS (smoothed)", linewidth=2)
+
+        # Thresholds
+        plt.axhline(start_thresh, color="g", linestyle="--", label=f"Start threshold ({start_frac*100:.0f}% peak)")
+        plt.axhline(end_thresh, color="r", linestyle="--", label=f"End threshold ({end_frac*100:.0f}% peak)")
+
+        # Trim markers
+        plt.axvline(trim_start, color="g", linewidth=2, label=f"Trim start {trim_start:.2f}s")
+        plt.axvline(trim_end, color="r", linewidth=2, label=f"Trim end {trim_end:.2f}s")
+
+        plt.title(f"Stairs Trim Detection - {folder_name}")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Gravity / RMS")
+        plt.legend()
+        plt.tight_layout()
+
+        # Save summary figure if out_dir provided
+        if out_dir is not None and folder_name is not None:
+            os.makedirs(out_dir, exist_ok=True)
+            save_path = os.path.join(out_dir, f"{folder_name}_stairs_trim_summary.png")
+            plt.savefig(save_path, dpi=150)
+            print(f"Summary plot saved to {save_path}")
+
+        plt.show()
+
+    return trim_start, trim_end

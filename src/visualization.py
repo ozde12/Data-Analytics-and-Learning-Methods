@@ -33,3 +33,29 @@ def plot_files(folders, folder_name, activity, files_to_plot):
         plt.ylabel("Value")
         plt.legend()
         plt.show()
+
+def plot_gravity(df_gravity, time, activity, folder_name):
+    """
+    Plot gravity sensor data.
+
+    Parameters
+    ----------
+    df_gravity : DataFrame
+        DataFrame containing gravity sensor data with columns 'x', 'y', 'z'.
+    time : array-like
+        Array of time values corresponding to the data points.
+    activity : str
+        Activity name (e.g., running, stand_up).
+    folder_name : str
+        Name of the folder (e.g., running_1_xxx).
+    """
+    plt.figure(figsize=(12, 5))
+    plt.plot(time, df_gravity["x"], label="x")
+    plt.plot(time, df_gravity["y"], label="y")
+    plt.plot(time, df_gravity["z"], label="z")
+
+    plt.title(f"{activity} - {folder_name} - Gravity.csv")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Gravity [m/s²]")
+    plt.legend()
+    plt.show()
