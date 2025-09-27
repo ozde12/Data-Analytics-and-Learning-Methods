@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 def trim_and_window(df, activity, folder_name, out_root, window_size=5, overlap=0.5):
@@ -338,3 +339,152 @@ def detect_trim_bounds_stairs(time, df_gravity, window_size=5, overlap=0.5,
         plt.show()
 
     return trim_start, trim_end
+
+# --------------------------------------------------------------------
+
+def find_activity_center(acc_df, env_win_s=0.5, thresh_ratio=0.2):
+    """
+    Find the center time of the main activity burst
+    using smoothed energy of |acc|.
+    """
+    secs = acc_df["seconds_elapsed"].astype(float).values
+    x, y, z = acc_df["x"].values, acc_df["y"].values, acc_df["z"].values
+
+    mag2 = x*x + y*y + z*z
+    # use about 0.5 s worth of samples for smoothing
+    n_env = max(3, int(round(env_win_s * 100)))  # assume ~100 Hz but only for smoothing width
+
+    env = pd.Series(mag2).rolling(
+        window=n_env, min_periods=max(3, int(0.4*n_env))
+    ).mean().values
+
+    idx_peak = int(np.nanargmax(env))
+    peak_val = env[idx_peak] if np.isfinite(env[idx_peak]) else 0.0
+    if peak_val <= 0:
+        # fallback: center of whole recording
+        return 0.5 * (secs.min() + secs.max())
+
+    thr = peak_val * thresh_ratio
+    iL = idx_peak
+    while iL > 0 and (not np.isnan(env[iL]) and env[iL] > thr):
+        iL -= 1
+    iR = idx_peak
+    while iR < len(env)-1 and (not np.isnan(env[iR]) and env[iR] > thr):
+        iR += 1
+
+    return 0.5 * (secs[iL] + secs[iR])
+
+
+def slice_centered_window(df, center_time, n_points):
+    """
+    Slice exactly n_points rows centered on center_time.
+    """
+    secs = df["seconds_elapsed"].astype(float).values
+
+    # index of sample closest to the desired center_time
+    center_idx = int(np.argmin(np.abs(secs - center_time)))
+    half = n_points // 2
+
+    start_idx = center_idx - half
+    end_idx = start_idx + n_points
+
+    # keep indices inside valid range
+    if start_idx < 0:
+        start_idx = 0
+        end_idx = n_points
+    if end_idx > len(df):
+        end_idx = len(df)
+        start_idx = max(0, end_idx - n_points)
+
+    # make sure they are integers
+    start_idx = int(start_idx)
+    end_idx   = int(end_idx)
+
+    return df.iloc[start_idx:end_idx].copy()
+
+
+def process_one_sample(sample_dir, out_dir, n_points, env_win_s=0.5, thresh_ratio=0.2):
+    """
+    Process one sample folder:
+      - find activity center from accelerometer
+      - cut fixed n_points window centered on it for all sensors
+      - save results
+    """
+    acc_path  = os.path.join(sample_dir, "Accelerometer.csv")
+    gyro_path = os.path.join(sample_dir, "Gyroscope.csv")
+    grav_path = os.path.join(sample_dir, "Gravity.csv")
+
+    if not (os.path.exists(acc_path) and os.path.exists(gyro_path) and os.path.exists(grav_path)):
+        return {"sample_dir": sample_dir, "status": "skipped: missing csv"}
+
+    acc  = pd.read_csv(acc_path)
+    gyro = pd.read_csv(gyro_path)
+    grav = pd.read_csv(grav_path)
+
+    for df, name in [(acc, "Accelerometer"), (gyro, "Gyroscope"), (grav, "Gravity")]:
+        for col in ["seconds_elapsed", "x", "y", "z"]:
+            if col not in df.columns:
+                return {"sample_dir": sample_dir, "status": f"skipped: bad {name}"}
+        df.sort_values("seconds_elapsed", inplace=True)
+
+    center_time = find_activity_center(acc, env_win_s=env_win_s, thresh_ratio=thresh_ratio)
+
+    acc_win  = slice_centered_window(acc,  center_time, n_points)
+    gyro_win = slice_centered_window(gyro, center_time, n_points)
+    grav_win = slice_centered_window(grav, center_time, n_points)
+
+    os.makedirs(out_dir, exist_ok=True)
+    acc_win.to_csv(os.path.join(out_dir, "Accelerometer.csv"), index=False)
+    gyro_win.to_csv(os.path.join(out_dir, "Gyroscope.csv"), index=False)
+    grav_win.to_csv(os.path.join(out_dir, "Gravity.csv"), index=False)
+
+    pd.DataFrame([{
+        "source_dir": os.path.basename(sample_dir),
+        "center_time": center_time,
+        "points_saved": len(acc_win)
+    }]).to_csv(os.path.join(out_dir, "window_info.csv"), index=False)
+
+    status = "ok" if len(acc_win) == n_points else "ok (truncated)"
+    return {"sample_dir": sample_dir, "out_dir": out_dir, "status": status}
+
+
+def trim_sitdown_standup(raw_base, clean_base, categories=("sit_down", "stand_up"), seconds=5.0, verbose=True):
+    """
+    Process all samples in given categories.
+    """
+    n_points = seconds * 100 #fs: 100Hz
+    results = []
+
+    for cat in categories:
+        raw_cat_dir   = os.path.join(raw_base, cat)
+        clean_cat_dir = os.path.join(clean_base, cat)
+
+        if not os.path.isdir(raw_cat_dir):
+            if verbose:
+                print(f"[WARN] missing folder: {cat}")
+            continue
+
+        for name in sorted(os.listdir(raw_cat_dir)):
+            sample_dir = os.path.join(raw_cat_dir, name)
+            if not os.path.isdir(sample_dir):
+                continue
+
+            sample_base = name.split("-")[0]
+            out_dir = os.path.join(clean_cat_dir, sample_base)
+
+            res = process_one_sample(sample_dir, out_dir, n_points)
+            results.append(res)
+            if verbose:
+                pass
+                #print(res)
+
+    df = pd.DataFrame(results)
+    if verbose and not df.empty:
+        ok = (df["status"].str.startswith("ok")).sum()
+        skipped = (df["status"].str.startswith("skipped")).sum()
+        print(f"Done. Processed: {ok} | Skipped: {skipped}")
+
+    return df
+
+#-----------------------------------------------------------------------------------------------
+
