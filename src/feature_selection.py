@@ -51,7 +51,7 @@ def _cv(n_splits=5):
 
 def _default_estimator():
     """Default estimator for wrapper selection (works with RFE)."""
-    return LogisticRegression(max_iter=2000, solver="liblinear", random_state=42)
+    return LogisticRegression(max_iter=2000, solver="lbfgs", multi_class="auto", random_state=42)
 
 
 def _supports_rfe(estimator):
@@ -263,8 +263,12 @@ def wrapper_select(
 # Visualization & Selection Aids
 # -------------------------
 
-def plot_correlation_heatmap(X, feature_names=None, figsize=(8,6)):
-    """Plot an absolute correlation heatmap (after variance filtering is ideal)."""
+def plot_correlation_heatmap(X, figsize=(8,6), show=True, block=False, save_path=None):
+    """Plot an absolute correlation heatmap (after variance filtering is ideal).
+    - show: whether to display the figure (default True)
+    - block: if show=True, whether plt.show() should block script execution (default False)
+    - save_path: if given, save the figure to this path instead of (or in addition to) showing it
+    """
     if isinstance(X, pd.DataFrame):
         df = X.copy()
     else:
@@ -278,14 +282,18 @@ def plot_correlation_heatmap(X, feature_names=None, figsize=(8,6)):
     plt.yticks(range(len(corr.index)), corr.index)
     plt.title("Absolute Correlation Heatmap")
     plt.tight_layout()
-    plt.show()
-
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+    if show:
+        plt.show(block=block)
+    plt.close()
 
 def accuracy_vs_k_MI(
     X, y, estimator=None, k_values=None,
     variance_thresh=0.0, corr_thresh=0.95,
     scale_for_mi=True, scale_inputs=True,
-    scoring="accuracy", cv_splits=5
+    scoring="accuracy", cv_splits=5,
+    show=True, block=False, save_path=None
 ):
     """
     Evaluate model accuracy vs number of features kept by MI-KBest.
@@ -325,7 +333,11 @@ def accuracy_vs_k_MI(
     plt.ylabel(f"CV {scoring}")
     plt.title("Model performance vs. K (Mutual Information K-Best)")
     plt.grid(True, linestyle="--", linewidth=0.5)
-    plt.show()
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+    if show:
+        plt.show(block=block)
+    plt.close()
 
     return k_list, acc_list
 
@@ -337,7 +349,9 @@ def pca_explained_variance(
     X,
     scale_inputs=True,
     n_components=None,
-    show_plot=True
+    show_plot=True,
+    block=False,
+    save_path=None
 ):
     """
     Plot cumulative explained variance from PCA (classification-agnostic).
@@ -354,14 +368,18 @@ def pca_explained_variance(
     evr = pca.explained_variance_ratio_
     cum = np.cumsum(evr)
 
-    if show_plot:
+    if show_plot or save_path is not None:
         plt.figure(figsize=(6,4))
         plt.plot(np.arange(1, len(cum)+1), cum, marker='o')
         plt.xlabel("Number of PCA components")
         plt.ylabel("Cumulative explained variance")
         plt.title("PCA cumulative explained variance")
         plt.grid(True, linestyle="--", linewidth=0.5)
-        plt.show()
+        if save_path is not None:
+            plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        if show_plot:
+            plt.show(block=block)
+        plt.close()
 
     return evr, cum, pca
 
@@ -420,7 +438,7 @@ if __name__ == "__main__":
 
     # 4) Baseline models on filtered features
     models = {
-        "LogisticRegression": LogisticRegression(max_iter=5000, solver="liblinear", random_state=42),
+        "LogisticRegression": LogisticRegression(max_iter=5000, solver="lbfgs", multi_class="auto", random_state=42),
         "KNN": KNeighborsClassifier(n_neighbors=5),
         "NaiveBayes": GaussianNB(),
         "DecisionTree": DecisionTreeClassifier(random_state=42)
@@ -434,27 +452,29 @@ if __name__ == "__main__":
         print(f"  {name}: {acc:.4f}")
 
     # Optional: visualize correlation after variance filtering
-    plot_correlation_heatmap(pd.DataFrame(Xf_train, columns=names_f))
+    plot_correlation_heatmap(pd.DataFrame(Xf_train, columns=names_f), show=True, block=False, save_path="corr_heatmap.png")
+    print("Saved correlation heatmap to corr_heatmap.png")
+
 
     # 5a) WRAPPER: RFE with Logistic Regression
     Xw_lr_train, names_lr, info_lr = wrapper_select(
         X_train_fs, y_train,
         method="rfe",
         n_features_to_select=min(15, X_train_fs.shape[1]),
-        estimator=LogisticRegression(max_iter=5000, solver="liblinear", random_state=42),
+        estimator=LogisticRegression(max_iter=5000, solver="lbfgs", multi_class="auto", random_state=42),
         scoring="accuracy",
         cv_splits=5,
         scale_inputs=True
     )
     print("RFE + LR selected:", names_lr, "CV acc:", info_lr["cv_score"])
 
-    # Evaluate with the wrapper-selected feature names
-    X_train_lr = X_train_scaled[names_lr]
-    X_test_lr  = X_test_scaled[names_lr]
-    lr_final = LogisticRegression(max_iter=5000, solver="liblinear", random_state=42)
-    lr_final.fit(X_train_lr, y_train)
-    y_pred_lr = lr_final.predict(X_test_lr)
-    print(f"Final test accuracy (RFE+LR, {len(names_lr)} features): {accuracy_score(y_test, y_pred_lr):.4f}")
+    # # Evaluate with the wrapper-selected feature names
+    # X_train_lr = X_train_scaled[names_lr]
+    # X_test_lr  = X_test_scaled[names_lr]
+    # lr_final = LogisticRegression(max_iter=5000, solver="lbfgs", multi_class="auto", random_state=42)
+    # lr_final.fit(X_train_lr, y_train)
+    # y_pred_lr = lr_final.predict(X_test_lr)
+    # print(f"Final test accuracy (RFE+LR, {len(names_lr)} features): {accuracy_score(y_test, y_pred_lr):.4f}")
 
     # 5b) WRAPPER: SFS with KNN (use SFS for estimators without coef_/importances_)
     Xw_knn_train, names_knn, info_knn = wrapper_select(
@@ -468,12 +488,12 @@ if __name__ == "__main__":
     )   
     print("SFS + KNN selected:", names_knn, "CV acc:", info_knn["cv_score"])
 
-    X_train_knn = X_train_scaled[names_knn]
-    X_test_knn  = X_test_scaled[names_knn]
-    knn_final = KNeighborsClassifier(n_neighbors=5)
-    knn_final.fit(X_train_knn, y_train)
-    y_pred_knn = knn_final.predict(X_test_knn)
-    print(f"Final test accuracy (SFS+KNN, {len(names_knn)} features): {accuracy_score(y_test, y_pred_knn):.4f}")
+    # X_train_knn = X_train_scaled[names_knn]
+    # X_test_knn  = X_test_scaled[names_knn]
+    # knn_final = KNeighborsClassifier(n_neighbors=5)
+    # knn_final.fit(X_train_knn, y_train)
+    # y_pred_knn = knn_final.predict(X_test_knn)
+    # print(f"Final test accuracy (SFS+KNN, {len(names_knn)} features): {accuracy_score(y_test, y_pred_knn):.4f}")
 
 
     # 5c) WRAPPER: SFS with Naive Bayes
@@ -488,12 +508,12 @@ if __name__ == "__main__":
     )
     print("SFS + NB selected:", names_nb, "CV acc:", info_nb["cv_score"])
 
-    X_train_nb = X_train_scaled[names_nb]
-    X_test_nb  = X_test_scaled[names_nb]
-    nb_final = GaussianNB()
-    nb_final.fit(X_train_nb, y_train)
-    y_pred_nb = nb_final.predict(X_test_nb)
-    print(f"Final test accuracy (SFS+NB, {len(names_nb)} features): {accuracy_score(y_test, y_pred_nb):.4f}")
+    # X_train_nb = X_train_scaled[names_nb]
+    # X_test_nb  = X_test_scaled[names_nb]
+    # nb_final = GaussianNB()
+    # nb_final.fit(X_train_nb, y_train)
+    # y_pred_nb = nb_final.predict(X_test_nb)
+    # print(f"Final test accuracy (SFS+NB, {len(names_nb)} features): {accuracy_score(y_test, y_pred_nb):.4f}")
 
 
     # 5d) WRAPPER: RFE with Decision Tree
@@ -508,15 +528,26 @@ if __name__ == "__main__":
     )
     print("RFE + DT selected:", names_dt, "CV acc:", info_dt["cv_score"])
 
-    X_train_dt = X_train_scaled[names_dt]
-    X_test_dt  = X_test_scaled[names_dt]
-    dt_final = DecisionTreeClassifier(random_state=42)
-    dt_final.fit(X_train_dt, y_train)
-    y_pred_dt = dt_final.predict(X_test_dt)
-    print(f"Final test accuracy (RFE+DT, {len(names_dt)} features): {accuracy_score(y_test, y_pred_dt):.4f}")
+    # X_train_dt = X_train_scaled[names_dt]
+    # X_test_dt  = X_test_scaled[names_dt]
+    # dt_final = DecisionTreeClassifier(random_state=42)
+    # dt_final.fit(X_train_dt, y_train)
+    # y_pred_dt = dt_final.predict(X_test_dt)
+    # print(f"Final test accuracy (RFE+DT, {len(names_dt)} features): {accuracy_score(y_test, y_pred_dt):.4f}")
 
 # Accuracy vs K to justify K choice (nice for reports)
-ks, accs = accuracy_vs_k_MI(X, y, estimator=LogisticRegression(max_iter=2000, solver="liblinear"))
+ks, accs = accuracy_vs_k_MI(
+    X, y,
+    estimator=LogisticRegression(max_iter=2000, solver="lbfgs", multi_class="auto"),
+    show=True, block=False, save_path="mi_k_curve.png"
+)
 
 # Optional: PCA variance curve (if you also explore PCA-based approach)
-evr, cum, pca = pca_explained_variance(X, scale_inputs=True, n_components=None, show_plot=True)
+evr, cum, pca = pca_explained_variance(
+    X,
+    scale_inputs=True,
+    n_components=None,
+    show_plot=True,
+    block=False,
+    save_path="pca_variance.png"
+)
