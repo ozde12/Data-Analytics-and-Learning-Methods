@@ -452,7 +452,7 @@ if __name__ == "__main__":
         print(f"  {name}: {acc:.4f}")
 
     # Optional: visualize correlation after variance filtering
-    plot_correlation_heatmap(pd.DataFrame(Xf_train, columns=names_f), show=True, block=False, save_path="corr_heatmap.png")
+    plot_correlation_heatmap(pd.DataFrame(Xf_train, columns=names_f), show=True, block=False, save_path="figures/corr_heatmap.png")
     print("Saved correlation heatmap to corr_heatmap.png")
 
 
@@ -539,7 +539,7 @@ if __name__ == "__main__":
 ks, accs = accuracy_vs_k_MI(
     X, y,
     estimator=LogisticRegression(max_iter=2000, solver="lbfgs", multi_class="auto"),
-    show=True, block=False, save_path="mi_k_curve.png"
+    show=True, block=False, save_path="figures/mi_k_curve.png"
 )
 
 # Optional: PCA variance curve (if you also explore PCA-based approach)
@@ -549,5 +549,5 @@ evr, cum, pca = pca_explained_variance(
     n_components=None,
     show_plot=True,
     block=False,
-    save_path="pca_variance.png"
+    save_path="figures/pca_variance.png"
 )
