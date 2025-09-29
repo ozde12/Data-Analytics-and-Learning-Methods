@@ -550,19 +550,19 @@ if __name__ == "__main__":
     # y_pred_dt = dt_final.predict(X_test_dt)
     # print(f"Final test accuracy (RFE+DT, {len(names_dt)} features): {accuracy_score(y_test, y_pred_dt):.4f}")
 
-# # Accuracy vs K to justify K choice (nice for reports)
-# ks, accs = accuracy_vs_k_MI(
-#     X, y,
-#     estimator=LogisticRegression(max_iter=2000, solver="lbfgs"),
-#     show=True, block=False, save_path="figures/mi_k_curve.png"
-# )
+    # # Accuracy vs K to justify K choice (nice for reports)
+    # ks, accs = accuracy_vs_k_MI(
+    #     X, y,
+    #     estimator=LogisticRegression(max_iter=2000, solver="lbfgs"),
+    #     show=True, block=False, save_path="figures/mi_k_curve.png"
+    # )
 
-# Optional: PCA variance curve (if you also explore PCA-based approach)
-evr, cum, pca = pca_explained_variance(
-    X,
-    scale_inputs=True,
-    n_components=None,
-    show_plot=True,
-    block=False,
-    save_path="figures/pca_variance.png"
-)
+    # Optional: PCA variance curve (if you also explore PCA-based approach)
+    evr, cum, pca = pca_explained_variance(
+        X,
+        scale_inputs=True,
+        n_components=None,
+        show_plot=True,
+        block=False,
+        save_path="figures/pca_variance.png"
+    )
