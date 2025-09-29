@@ -51,7 +51,7 @@ def _cv(n_splits=5):
 
 def _default_estimator():
     """Default estimator for wrapper selection (works with RFE)."""
-    return LogisticRegression(max_iter=2000, solver="lbfgs", multi_class="auto", random_state=42)
+    return LogisticRegression(max_iter=2000, solver="lbfgs", random_state=42)
 
 
 def _supports_rfe(estimator):
@@ -122,21 +122,36 @@ def filter_select(
     df_vt = pd.DataFrame(X_vt, columns=kept_ft_vt)
     corr = df_vt.corr().abs()
     upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-    ft_to_drop = [col for col in upper.columns if any(upper[col] > corr_thresh)]
+
+    # Build explicit (kept -> removed) pairs with their correlation
+    pairs = []
+    to_drop_set = set()
+    for col in upper.columns:
+        high = upper[col][upper[col] > corr_thresh]
+        for kept_name, r in high.items():
+            removed_name = col  # by design we keep the earlier (row) and remove the later (col)
+            pairs.append((kept_name, removed_name, float(r)))
+            to_drop_set.add(removed_name)
+
+    # Preserve original column order for removal list
+    ft_to_drop = [c for c in upper.columns if c in to_drop_set]
     kept_ft_corr = [c for c in df_vt.columns if c not in ft_to_drop]
     X_corr = df_vt[kept_ft_corr].values
 
-    print(f"[CorrelationFilter] Kept: {len(kept_ft_corr)}, Removed: {len(ft_to_drop)}")
+    print(f"[CorrelationFilter] Kept: {len(kept_ft_corr)}, Removed: {len(ft_to_drop)} (|r| > {corr_thresh})")
     if ft_to_drop:
         print("Removed highly correlated features:", ft_to_drop)
+        print("Correlated pairs (kept -> removed, r):")
+        for k_name, r_name, r_val in pairs:
+            print(f"  {k_name} -> {r_name} (r={r_val:.3f})")
 
     report_rows.append({
         "stage": "corr_filter",
         "kept": len(kept_ft_corr),
         "removed": len(ft_to_drop),
-        "removed_features": ft_to_drop
+        "removed_features": ft_to_drop,
+        "corr_pairs": [{"kept": k, "removed": r, "r": v} for k, r, v in pairs]
     })
-
     # 3) Mutual Information K-Best (optional)
     if (k_best is not None) and (y is not None) and (k_best < X_corr.shape[1]):
         X_for_scoring = StandardScaler().fit_transform(X_corr) if scale_for_mi else X_corr
@@ -438,7 +453,7 @@ if __name__ == "__main__":
 
     # 4) Baseline models on filtered features
     models = {
-        "LogisticRegression": LogisticRegression(max_iter=5000, solver="lbfgs", multi_class="auto", random_state=42),
+        "LogisticRegression": LogisticRegression(max_iter=5000, solver="lbfgs", random_state=42),
         "KNN": KNeighborsClassifier(n_neighbors=5),
         "NaiveBayes": GaussianNB(),
         "DecisionTree": DecisionTreeClassifier(random_state=42)
@@ -461,7 +476,7 @@ if __name__ == "__main__":
         X_train_fs, y_train,
         method="rfe",
         n_features_to_select=min(15, X_train_fs.shape[1]),
-        estimator=LogisticRegression(max_iter=5000, solver="lbfgs", multi_class="auto", random_state=42),
+        estimator=LogisticRegression(max_iter=5000, solver="lbfgs", random_state=42),
         scoring="accuracy",
         cv_splits=5,
         scale_inputs=True
@@ -471,7 +486,7 @@ if __name__ == "__main__":
     # # Evaluate with the wrapper-selected feature names
     # X_train_lr = X_train_scaled[names_lr]
     # X_test_lr  = X_test_scaled[names_lr]
-    # lr_final = LogisticRegression(max_iter=5000, solver="lbfgs", multi_class="auto", random_state=42)
+    # lr_final = LogisticRegression(max_iter=5000, solver="lbfgs", random_state=42)
     # lr_final.fit(X_train_lr, y_train)
     # y_pred_lr = lr_final.predict(X_test_lr)
     # print(f"Final test accuracy (RFE+LR, {len(names_lr)} features): {accuracy_score(y_test, y_pred_lr):.4f}")
@@ -535,12 +550,12 @@ if __name__ == "__main__":
     # y_pred_dt = dt_final.predict(X_test_dt)
     # print(f"Final test accuracy (RFE+DT, {len(names_dt)} features): {accuracy_score(y_test, y_pred_dt):.4f}")
 
-# Accuracy vs K to justify K choice (nice for reports)
-ks, accs = accuracy_vs_k_MI(
-    X, y,
-    estimator=LogisticRegression(max_iter=2000, solver="lbfgs", multi_class="auto"),
-    show=True, block=False, save_path="figures/mi_k_curve.png"
-)
+# # Accuracy vs K to justify K choice (nice for reports)
+# ks, accs = accuracy_vs_k_MI(
+#     X, y,
+#     estimator=LogisticRegression(max_iter=2000, solver="lbfgs"),
+#     show=True, block=False, save_path="figures/mi_k_curve.png"
+# )
 
 # Optional: PCA variance curve (if you also explore PCA-based approach)
 evr, cum, pca = pca_explained_variance(
