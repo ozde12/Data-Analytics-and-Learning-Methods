@@ -123,11 +123,11 @@ def process_folder(folder_data, activity, folder_name, out_root, window_size=5, 
         windows.append((time[start], time[end - 1]))
 
     # Save all files for each window
-    out_dir = os.path.join(out_root, activity, folder_name)
+    out_dir = os.path.join(out_root, activity)
     os.makedirs(out_dir, exist_ok=True)
 
     for i, (win_start, win_end) in enumerate(windows):
-        win_dir = os.path.join(out_dir, f"window_{i+1}")
+        win_dir = os.path.join(out_dir, f"{folder_name}_window_{i+1}")
         os.makedirs(win_dir, exist_ok=True)
         for file_name, file_df in folder_data.items():
             if "seconds_elapsed" not in file_df.columns:
