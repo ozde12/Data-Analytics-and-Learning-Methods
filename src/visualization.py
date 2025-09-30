@@ -1,4 +1,6 @@
 import matplotlib.pyplot as plt
+import pandas as pd 
+import os
 
 def plot_activity(activity_dir: str) -> None:
     """

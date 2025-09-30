@@ -306,7 +306,7 @@ def detect_trim_bounds_stairs(time, df_gravity, window_size=5, overlap=0.5,
     trim_start = rms_times[start_idx]
     trim_end = rms_times[end_idx]
 
-    # --- Debug / Summary plot ---
+    #  Debug / Summary plot 
     if debug:
         plt.figure(figsize=(12,6))
         # Plot raw gravity magnitude
