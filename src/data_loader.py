@@ -1,17 +1,10 @@
 import os
 import pandas as pd
+from pathlib import Path
 
-def load_all_data():
-    home = os.path.expanduser("~")
-    base_dir = os.path.join(
-        home,
-        "Documents",
-        "data analytics",
-        "Data-Analytics-and-Learning-Methods",
-        "data",
-        "raw",
-    )
+def load_all_data(base_dir, print_option=True):
 
+    base_dir = Path(base_dir)
     activities = ["running", "sit_down", "stairs", "stand_up", "walking"]
 
     data = {}
@@ -33,7 +26,8 @@ def load_all_data():
             for file_name in os.listdir(folder):
                 if file_name.endswith(".csv"):
                     file_path = os.path.join(folder, file_name)
-                    print(f"Loading {file_path}...")
+                    if print_option:
+                        print(f"Loading {file_path}...")
                     try:
                         df = pd.read_csv(file_path, skipinitialspace=True)
                         if df.empty:
@@ -41,8 +35,11 @@ def load_all_data():
                         df.columns = df.columns.str.strip()
                         csvs[file_name] = df
                     except Exception as e:
-                        print(f"Could not load {file_name}: {e}")
+                        if print_option:
+                            print(f"Could not load {file_name}: {e}")
             if csvs:
                 data[activity][folder_name] = csvs
 
+    print("Data Loaded")
+    print("Raw Data Classes:", list(data.keys()))
     return data
