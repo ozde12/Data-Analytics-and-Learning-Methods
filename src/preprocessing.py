@@ -1,7 +1,9 @@
 import os
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.model_selection import StratifiedGroupKFold
 
 def trim_and_window(df, activity, folder_name, out_root, window_size=5, overlap=0.5):
     """
@@ -487,3 +489,136 @@ def trim_sitdown_standup(raw_base, clean_base, categories=("sit_down", "stand_up
     return df
 
 
+def stratified_person_label_split_from_csv(
+    csv_path: str,
+    test_ratio: float = 0.20,
+    val_ratio_within_trainval: float = 0.20,
+    random_state: int = 42
+):
+    """
+    Split dataset into train/val/test with stratification by class labels
+    and grouping by person ID (so no person leaks across splits).
+
+    Assumes dataset.csv format:
+        - First column = label (y)
+        - Columns 1..-2 = features (X)
+        - Last column = folder/sample name (e.g., "liya_sample1")
+
+    Splitting is done *within each (person, label)* bucket:
+        1) train+val vs test (test_ratio, e.g. 0.20)
+        2) train vs val on train+val (val_ratio_within_trainval, e.g. 0.20)
+    => overall ~64/16/20 train/val/test.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to dataset.csv
+    test_ratio : float, default=0.2
+        Fraction of total data used for test
+    val_ratio_within_trainval : float, default=0.2
+        Fraction of train+val data used for validation
+        (so final split is (1-test_ratio)*(1-val_ratio_within_trainval), (1-test_ratio)*val_ratio_within_trainval, test_ratio
+    random_state : int, default=42
+        Random seed for reproducibility
+
+    Returns
+    -------
+    train_idx, val_idx, test_idx : np.ndarray
+        Row indices in the original CSV for each split.
+    train_names, val_names, test_names : list[str]
+        The last-column sample names belonging to each split (for debugging/logs).
+    info : dict
+        Metadata with counts per split and per person/label.
+
+    """
+    rng = np.random.RandomState(random_state)
+
+    df = pd.read_csv(csv_path)
+    y = df.iloc[:, 0].values
+    sample_names = df.iloc[:, -1].astype(str).values
+
+    # Person parser: "liya_sample1" -> "liya"
+    def _infer_person(name: str) -> str:
+        if "_" in name:
+            return name.split("_", 1)[0]
+        m = re.match(r"^([A-Za-z]+)", name)
+        return m.group(1) if m else name
+
+    persons = np.array([_infer_person(s) for s in sample_names])
+
+    # Build (person, label) -> list of row indices
+    buckets = defaultdict(list)
+    for i, (p, label) in enumerate(zip(persons, y)):
+        buckets[(p, label)].append(i)
+
+    # Allocate indices
+    train_idx, val_idx, test_idx = [], [], []
+
+    for (p, label), idx_list in buckets.items():
+        # shuffle indices within each (person, label) bucket
+        idx = np.array(idx_list)
+        rng.shuffle(idx)
+
+        n = len(idx)
+        # Step 1: split test
+        n_trainval = int(round((1.0 - test_ratio) * n))
+        n_test = n - n_trainval
+
+        idx_trainval = idx[:n_trainval]
+        idx_test = idx[n_trainval:]
+
+        # Step 2: split train vs val inside trainval
+        n_train = int(round((1.0 - val_ratio_within_trainval) * len(idx_trainval)))
+        n_val = len(idx_trainval) - n_train
+
+        idx_train = idx_trainval[:n_train]
+        idx_val = idx_trainval[n_train:]
+
+        # collect
+        train_idx.extend(idx_train.tolist())
+        val_idx.extend(idx_val.tolist())
+        test_idx.extend(idx_test.tolist())
+
+    # Convert to arrays and (optionally) shuffle globally for randomness
+    train_idx = np.array(train_idx, dtype=int)
+    val_idx   = np.array(val_idx, dtype=int)
+    test_idx  = np.array(test_idx, dtype=int)
+
+    rng.shuffle(train_idx)
+    rng.shuffle(val_idx)
+    rng.shuffle(test_idx)
+
+    # Names for quick inspection
+    train_names = sample_names[train_idx].tolist()
+    val_names   = sample_names[val_idx].tolist()
+    test_names  = sample_names[test_idx].tolist()
+
+    # Build a small report
+    def _counts(arr):
+        return pd.Series(arr).value_counts().sort_index()
+
+    info = {
+        "sizes": {
+            "train": len(train_idx),
+            "val": len(val_idx),
+            "test": len(test_idx),
+            "total": len(df),
+        },
+        "ratios": {
+            "train": len(train_idx) / len(df),
+            "val": len(val_idx) / len(df),
+            "test": len(test_idx) / len(df),
+        },
+        "class_dist": {
+            "train": _counts(y[train_idx]).to_dict(),
+            "val": _counts(y[val_idx]).to_dict(),
+            "test": _counts(y[test_idx]).to_dict(),
+        },
+        "person_dist": {
+            "train": _counts(persons[train_idx]).to_dict(),
+            "val": _counts(persons[val_idx]).to_dict(),
+            "test": _counts(persons[test_idx]).to_dict(),
+        },
+    }
+
+    return train_idx, val_idx, test_idx, train_names, val_names, test_names, info
