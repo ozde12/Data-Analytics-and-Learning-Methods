@@ -84,37 +84,30 @@ def trim_and_window(df, activity, folder_name, out_root, window_size=5, overlap=
 
     return trim_start, trim_end, len(overlapping_windows), out_dir
 
-
-def process_folder(folder_data, activity, folder_name, out_root, window_size=5, overlap=0.5):
+def process_folder(folder_data, activity, folder_name, out_root,
+                   trim_start=None, trim_end=None,
+                   window_size=5, overlap=0.5):
     """
-    Detect trim start & end from Accelerometer.csv, create time windows,
-    apply them to ALL CSVs in the folder, and save them.
+    Create time windows between trim_start and trim_end.
+    If not provided, detect them from Accelerometer.csv.
     """
     df_acc = folder_data["Accelerometer.csv"]
     time = df_acc["seconds_elapsed"].values
     y_values = df_acc["y"].values
 
-    # Parameters
     sample_rate = len(time) / (time[-1] - time[0])
-    print(f"sample rate {sample_rate}")
     step = int(window_size * sample_rate)
-    print(f"step {step}")
     stride = int(step * (1 - overlap))
-    print(f"stride {stride}")
 
-    # Use the updated trim detection
-    trim_start, trim_end = detect_trim_bounds_rms_intersection(
-        time,
-        y_values,
-        step,
-        stride,
-        frac_start=0.8,   # adjust to control when start is detected
-        frac_end=0.7,     # adjust to control when end is detected
-        smooth=5,
-        debug=False
-    )
+    # --- Trim detection if not provided ---
+    if trim_start is None or trim_end is None:
+        trim_start, trim_end = detect_trim_bounds_rms_intersection(
+            time, y_values, step, stride,
+            frac_start=0.8, frac_end=0.7,
+            smooth=5, debug=False
+        )
 
-    # Build time-based windows only between trim_start–trim_end
+    # --- Build windows ---
     windows = []
     start_idx = np.searchsorted(time, trim_start)
     end_idx   = np.searchsorted(time, trim_end)
@@ -122,7 +115,7 @@ def process_folder(folder_data, activity, folder_name, out_root, window_size=5, 
         end = start + step
         windows.append((time[start], time[end - 1]))
 
-    # Save all files for each window
+    # --- Save windows ---
     out_dir = os.path.join(out_root, activity)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -134,27 +127,6 @@ def process_folder(folder_data, activity, folder_name, out_root, window_size=5, 
                 continue
             mask = (file_df["seconds_elapsed"] >= win_start) & (file_df["seconds_elapsed"] <= win_end)
             file_df[mask].to_csv(os.path.join(win_dir, file_name), index=False)
-
-    # Save summary plot (accelerometer only)
-    plt.figure(figsize=(12, 5))
-    plt.plot(time, df_acc["x"], label="x")
-    plt.plot(time, df_acc["y"], label="y")
-    plt.plot(time, df_acc["z"], label="z")
-
-    # Mark trim start and end
-    plt.axvline(trim_start, color="red", linestyle="--", label="Trim start")
-    plt.axvline(trim_end, color="blue", linestyle="--", label="Trim end")
-
-    # Shade windows
-    for win_start, win_end in windows:
-        plt.axvspan(win_start, win_end, color="gray", alpha=0.1)
-
-    plt.title(f"{activity} - {folder_name} - Accelerometer.csv (Trim + Overlap)")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Acceleration [m/s²]")
-    plt.legend()
-    plt.savefig(os.path.join(out_dir, "summary_plot.png"))
-    plt.close()
 
     return trim_start, trim_end, len(windows), out_dir
 
