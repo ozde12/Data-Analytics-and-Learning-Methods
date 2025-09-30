@@ -486,5 +486,4 @@ def trim_sitdown_standup(raw_base, clean_base, categories=("sit_down", "stand_up
 
     return df
 
-#-----------------------------------------------------------------------------------------------
 
