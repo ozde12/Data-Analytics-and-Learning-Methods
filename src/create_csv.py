@@ -272,9 +272,3 @@ def build_dataset_from_windows(
     print(f"\n[Done] Wrote {len(df_all)} rows × {df_all.shape[1]} columns to: {out_csv}")
     return df_all
 
-
-if __name__ == "__main__":
-
-    #OUT_CSV = PROJECT_ROOT / "dataset.csv"
-    #audit_windows(WINDOW_BASE)
-    #df = build_dataset_from_windows(WINDOW_BASE, OUT_CSV, keep_ids=False)
