@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.model_selection import StratifiedGroupKFold
+from collections import defaultdict
+from sklearn.metrics import silhouette_score
+
 
 #////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -805,3 +808,96 @@ def stratified_person_label_split_from_csv(
     }
 
     return train_idx, val_idx, test_idx, train_names, val_names, test_names, info
+
+def unsup_wrapper_select(X, model_class, model_kwargs,
+                         n_features_to_select=15,
+                         random_state=42,
+                         mode="fixed"):
+    """
+    Forward selection wrapper for unsupervised clustering.
+    Works with KMeans, GaussianMixture, and FuzzyCMeans.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Input feature matrix.
+    model_class : class
+        Clustering algorithm class (e.g., KMeans, GaussianMixture).
+    model_kwargs : dict
+        Parameters passed to the clustering model.
+    n_features_to_select : int
+        Max number of features to try (in 'auto' mode, it's the limit).
+    random_state : int
+        Random seed (only used if model supports it).
+    mode : str
+        "fixed" → select exactly n_features_to_select features.
+        "auto"  → stop early if silhouette stops improving.
+
+    Returns
+    -------
+    X_best : pd.DataFrame
+        Data restricted to best subset of features.
+    best_subset : list
+        List of selected feature names.
+    best_score : float
+        Best silhouette score.
+    history : list of tuples
+        (step, feature_added, silhouette_score) for each step.
+    """
+    features = list(X.columns)
+    selected = []
+    best_score = -1
+    best_subset = []
+    history = []
+
+    for step in range(1, n_features_to_select + 1):
+        scores = []
+        for f in features:
+            if f in selected:
+                continue
+            trial = selected + [f]
+
+            # Safe init (some models don’t accept random_state)
+            try:
+                model = model_class(random_state=random_state, **model_kwargs)
+            except TypeError:
+                model = model_class(**model_kwargs)
+
+            # Universal label extraction
+            if hasattr(model, "fit_predict"):
+                labels = model.fit_predict(X[trial])
+            elif hasattr(model, "predict"):
+                model.fit(X[trial])
+                labels = model.predict(X[trial])
+            elif hasattr(model, "fit"):  # fuzzy C-means fallback
+                model.fit(X[trial].to_numpy())
+                labels = model.u.argmax(axis=1)
+            else:
+                raise ValueError(f"Model {model_class.__name__} not supported.")
+
+            if len(np.unique(labels)) < 2:
+                continue
+
+            score = silhouette_score(X[trial], labels)
+            scores.append((score, f))
+
+        if not scores:
+            break
+
+        # Pick best feature
+        scores.sort(reverse=True, key=lambda x: x[0])
+        best_feature, step_score = scores[0][1], scores[0][0]
+        selected.append(best_feature)
+        history.append((step, best_feature, step_score))
+
+        print(f"Step {step} | Added: {best_feature} | silhouette={step_score:.3f}")
+
+        # Track global best
+        if step_score > best_score:
+            best_score = step_score
+            best_subset = selected.copy()
+        elif mode == "auto":  # stop early
+            print("No improvement, stopping early.")
+            break
+
+    return X[best_subset], best_subset, best_score, history
