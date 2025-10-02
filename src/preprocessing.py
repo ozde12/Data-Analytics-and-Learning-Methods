@@ -681,7 +681,7 @@ def stratified_person_label_split_from_csv(
     val_ratio_within_trainval: float = 0.20,
     random_state: int = 42
 ):
-    """
+    '''
     Split dataset into train/val/test with stratification by class labels
     and grouping by person ID (so no person leaks across splits).
 
@@ -716,7 +716,7 @@ def stratified_person_label_split_from_csv(
     info : dict
         Metadata with counts per split and per person/label.
 
-    """
+    '''
     rng = np.random.RandomState(random_state)
 
     df = pd.read_csv(csv_path)
@@ -808,6 +808,7 @@ def stratified_person_label_split_from_csv(
     }
 
     return train_idx, val_idx, test_idx, train_names, val_names, test_names, info
+
 
 def unsup_wrapper_select(X, model_class, model_kwargs,
                          n_features_to_select=15,

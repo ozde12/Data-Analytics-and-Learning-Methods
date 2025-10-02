@@ -178,12 +178,12 @@ def audit_windows(WINDOWED_ROOT: str | Path, activities: list[str] | None = None
 
 
 # ---------- DATASET BUILDER ----------
-def build_dataset_from_windows(
+def build_dataset_from_windowed_data(
     WINDOWED_ROOT: str | Path,
     OUT_CSV: str | Path = "dataset.csv",
     activities: list[str] | None = None,
     fs: float = 100.0,
-    keep_ids: bool = False,   # set True to keep sample/window identifiers
+    keep_ids: bool = False,   # set True to keep person identifier
 ) -> pd.DataFrame:
     """
     Walks WINDOWED_ROOT/<activity>/<window_folder>/ where each window folder contains:
@@ -194,7 +194,7 @@ def build_dataset_from_windows(
     Extracts the full feature set per sensor (prefixed 'acc_', 'gyro_', 'grav_'),
     concatenates into a single row per window, adds label 'activity', and saves to OUT_CSV.
 
-    If keep_ids = False (default), columns 'sample_id', 'win_index', 'window_folder' are dropped.
+    If keep_ids = False (default), column 'person' is dropped.
     """
     root = Path(WINDOWED_ROOT)
     if activities is None:
@@ -220,12 +220,10 @@ def build_dataset_from_windows(
         for w in win_dirs:
             total += 1
             row = {"activity": act}
+            # Extract person name (part before the first underscore)
             if keep_ids:
-                row["window_folder"] = w.name
-                if "_win" in w.name:
-                    sid, wid = w.name.rsplit("_win", 1)
-                    row["sample_id"] = sid
-                    row["win_index"] = wid
+                person = w.name.split("_", 1)[0]
+                row["person"] = person
 
             ok = True
             for prefix, fname in sensor_targets.items():
@@ -256,11 +254,9 @@ def build_dataset_from_windows(
 
     df_all = pd.DataFrame(rows)
 
-    # Drop identifiers unless requested
-    if not keep_ids:
-        drop_cols = [c for c in ["sample_id","win_index","window_folder"] if c in df_all.columns]
-        if drop_cols:
-            df_all = df_all.drop(columns=drop_cols)
+    # Drop person identifier unless requested
+    if not keep_ids and "person" in df_all.columns:
+        df_all = df_all.drop(columns=["person"])
 
     # Put label first
     cols = ["activity"] + sorted([c for c in df_all.columns if c != "activity"])
