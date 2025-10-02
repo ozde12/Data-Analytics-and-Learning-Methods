@@ -149,8 +149,7 @@ def filter_select(
         "stage": "corr_filter",
         "kept": len(kept_ft_corr),
         "removed": len(ft_to_drop),
-        "removed_features": ft_to_drop,
-        "corr_pairs": [{"kept": k, "removed": r, "r": v} for k, r, v in pairs]
+        "removed_features": ft_to_drop
     })
     # 3) Mutual Information K-Best (optional)
     if (k_best is not None) and (y is not None) and (k_best < X_corr.shape[1]):
@@ -175,9 +174,9 @@ def filter_select(
             "removed_features": removed_ft_k
         })
         return X_k, kept_ft_k, pd.DataFrame(report_rows)
-
+    else:
     # If K-Best not applied, return correlation-filtered set
-    return X_corr, kept_ft_corr, pd.DataFrame(report_rows)
+        return X_corr, kept_ft_corr, pd.DataFrame(report_rows)
 
 # -------------------------
 # WRAPPER STAGE (RFE or SFS)
