@@ -674,140 +674,124 @@ def trim_sitdown_standup(raw_base, clean_base, categories=("sit_down", "stand_up
 
     return df
 
-
-def stratified_person_label_split_from_csv(
-    csv_path: str,
+def stratified_person_label_split(
+    X: pd.DataFrame,
+    y: pd.Series | pd.DataFrame,
     test_ratio: float = 0.20,
-    val_ratio_within_trainval: float = 0.20,
-    random_state: int = 42
-):
-    '''
-    Split dataset into train/val/test with stratification by class labels
-    and grouping by person ID (so no person leaks across splits).
+    random_state: int = 42):
+    """
+    Split X, y into train/test with stratification by the joint (person, label) buckets.
 
-    Assumes dataset.csv format:
-        - First column = label (y)
-        - Columns 1..-2 = features (X)
-        - Last column = folder/sample name (e.g., "liya_sample1")
-
-    Splitting is done *within each (person, label)* bucket:
-        1) train+val vs test (test_ratio, e.g. 0.20)
-        2) train vs val on train+val (val_ratio_within_trainval, e.g. 0.20)
-    => overall ~64/16/20 train/val/test.
+    Assumptions
+    -----------
+    - X is a DataFrame whose last column contains the person name as a string (e.g., "liya").
+    - y is a Series or a single-column DataFrame with the class labels.
+    - We DO NOT enforce "person isolation" (i.e., the same person may appear in both splits).
+    We simply preserve the distribution across (person, label) buckets.
 
     Parameters
     ----------
-    csv_path : str
-        Path to dataset.csv
-    test_ratio : float, default=0.2
-        Fraction of total data used for test
-    val_ratio_within_trainval : float, default=0.2
-        Fraction of train+val data used for validation
-        (so final split is (1-test_ratio)*(1-val_ratio_within_trainval), (1-test_ratio)*val_ratio_within_trainval, test_ratio
+    X : pd.DataFrame
+        Features; last column is person name (string).
+    y : pd.Series | pd.DataFrame
+        Labels aligned with X's rows.
+    test_ratio : float, default=0.20
+        Fraction of total samples to allocate to the test split.
     random_state : int, default=42
-        Random seed for reproducibility
+        RNG seed for reproducibility.
 
     Returns
     -------
-    train_idx, val_idx, test_idx : np.ndarray
-        Row indices in the original CSV for each split.
-    train_names, val_names, test_names : list[str]
-        The last-column sample names belonging to each split (for debugging/logs).
-    info : dict
-        Metadata with counts per split and per person/label.
+    X_train, y_train, X_test, y_test, info
+        - Train/Test splits preserving (person, label) proportions.
+        - info: dict with sizes/ratios and per-class/per-person distributions.
+    """
+    # Normalize y to a 1D array for internal processing, but keep original object for return
+    if isinstance(y, pd.DataFrame):
+        if y.shape[1] != 1:
+            raise ValueError("y DataFrame must have exactly one column.")
+        y_1d = y.iloc[:, 0].values
+    else:
+        y_1d = y.values
 
-    '''
+    if X.shape[0] != len(y_1d):
+        raise ValueError("X and y must have the same number of rows.")
+
+    # Person names: last column of X
+    person_col = X.columns[-1]
+    persons = X[person_col].astype(str).values
+
     rng = np.random.RandomState(random_state)
-
-    df = pd.read_csv(csv_path)
-    y = df.iloc[:, 0].values
-    sample_names = df.iloc[:, -1].astype(str).values
-
-    # Person parser: "liya_sample1" -> "liya"
-    def _infer_person(name: str) -> str:
-        if "_" in name:
-            return name.split("_", 1)[0]
-        m = re.match(r"^([A-Za-z]+)", name)
-        return m.group(1) if m else name
-
-    persons = np.array([_infer_person(s) for s in sample_names])
+    n_total = len(X)
 
     # Build (person, label) -> list of row indices
-    buckets = defaultdict(list)
-    for i, (p, label) in enumerate(zip(persons, y)):
+    buckets: dict[tuple[str, Any], list[int]] = defaultdict(list)
+    for i, (p, label) in enumerate(zip(persons, y_1d)):
         buckets[(p, label)].append(i)
 
-    # Allocate indices
-    train_idx, val_idx, test_idx = [], [], []
+    # Allocate indices per bucket
+    train_idx: list[int] = []
+    test_idx:  list[int] = []
 
     for (p, label), idx_list in buckets.items():
-        # shuffle indices within each (person, label) bucket
         idx = np.array(idx_list)
         rng.shuffle(idx)
 
         n = len(idx)
-        # Step 1: split test
-        n_trainval = int(round((1.0 - test_ratio) * n))
-        n_test = n - n_trainval
+        n_train = int(round((1.0 - test_ratio) * n))
+        # guardrails to avoid empty splits if bucket is tiny
+        n_train = min(max(n_train, 0), n)
+        n_test = n - n_train
 
-        idx_trainval = idx[:n_trainval]
-        idx_test = idx[n_trainval:]
+        train_idx.extend(idx[:n_train].tolist())
+        test_idx.extend(idx[n_train:].tolist())
 
-        # Step 2: split train vs val inside trainval
-        n_train = int(round((1.0 - val_ratio_within_trainval) * len(idx_trainval)))
-        n_val = len(idx_trainval) - n_train
-
-        idx_train = idx_trainval[:n_train]
-        idx_val = idx_trainval[n_train:]
-
-        # collect
-        train_idx.extend(idx_train.tolist())
-        val_idx.extend(idx_val.tolist())
-        test_idx.extend(idx_test.tolist())
-
-    # Convert to arrays and (optionally) shuffle globally for randomness
+    # Convert to arrays and shuffle globally to mix buckets
     train_idx = np.array(train_idx, dtype=int)
-    val_idx   = np.array(val_idx, dtype=int)
     test_idx  = np.array(test_idx, dtype=int)
-
     rng.shuffle(train_idx)
-    rng.shuffle(val_idx)
     rng.shuffle(test_idx)
 
-    # Names for quick inspection
-    train_names = sample_names[train_idx].tolist()
-    val_names   = sample_names[val_idx].tolist()
-    test_names  = sample_names[test_idx].tolist()
+    # Build splits
+    X_train = X.iloc[train_idx]
+    X_test  = X.iloc[test_idx]
 
-    # Build a small report
+    # Preserve y's original type
+    if isinstance(y, pd.DataFrame):
+        y_train = y.iloc[train_idx]
+        y_test  = y.iloc[test_idx]
+    else:
+        y_train = y.iloc[train_idx]
+        y_test  = y.iloc[test_idx]
+
+    # ---- Info report
     def _counts(arr):
-        return pd.Series(arr).value_counts().sort_index()
+        return pd.Series(arr).value_counts().sort_index().to_dict()
 
     info = {
         "sizes": {
             "train": len(train_idx),
-            "val": len(val_idx),
-            "test": len(test_idx),
-            "total": len(df),
+            "test":  len(test_idx),
+            "total": n_total,
         },
         "ratios": {
-            "train": len(train_idx) / len(df),
-            "val": len(val_idx) / len(df),
-            "test": len(test_idx) / len(df),
+            "train": len(train_idx) / n_total,
+            "test":  len(test_idx) / n_total,
         },
         "class_dist": {
-            "train": _counts(y[train_idx]).to_dict(),
-            "val": _counts(y[val_idx]).to_dict(),
-            "test": _counts(y[test_idx]).to_dict(),
+            "train": _counts(np.asarray(y_1d)[train_idx]),
+            "test":  _counts(np.asarray(y_1d)[test_idx]),
         },
         "person_dist": {
-            "train": _counts(persons[train_idx]).to_dict(),
-            "val": _counts(persons[val_idx]).to_dict(),
-            "test": _counts(persons[test_idx]).to_dict(),
+            "train": _counts(np.asarray(persons)[train_idx]),
+            "test":  _counts(np.asarray(persons)[test_idx]),
         },
+        "stratified_on": "joint (person, label) buckets",
+        "person_column": person_col,
     }
 
-    return train_idx, val_idx, test_idx, train_names, val_names, test_names, info
+    return X_train, y_train, X_test, y_test, info
+
 
 
 def unsup_wrapper_select(X, model_class, model_kwargs,
