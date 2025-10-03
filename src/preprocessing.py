@@ -810,8 +810,10 @@ def stratified_person_label_split_from_csv(
     return train_idx, val_idx, test_idx, train_names, val_names, test_names, info
 
 
-def unsup_wrapper_select(X, model_class, model_kwargs,
-                         n_features_to_select=15,
+def unsup_wrapper_select(X, 
+                         model_class, 
+                         model_kwargs,
+                         n_features_to_select,              # give X.shape[1] as default
                          random_state=42,
                          mode="fixed"):
     """
@@ -845,6 +847,10 @@ def unsup_wrapper_select(X, model_class, model_kwargs,
     history : list of tuples
         (step, feature_added, silhouette_score) for each step.
     """
+
+    if n_features_to_select is None:
+        n_features_to_select = X.shape[1]
+        
     features = list(X.columns)
     selected = []
     best_score = -1
