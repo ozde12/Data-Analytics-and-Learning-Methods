@@ -97,7 +97,7 @@ def preprocess_walking(trimmed_root, all_data, window_size=3.0, show_plots=True)
         print(f"  Trim {trim_start:.2f} → {trim_end:.2f}, {n_win} windows, saved in {out_dir}")
 
 
-def preprocess_stairs(trimmed_root, all_data, window_size=3.0, show_plots=True):
+"""def preprocess_stairs(trimmed_root, all_data, window_size=3.0, show_plots=True):
 
     activity = "stairs"
     out_dir = os.path.join(trimmed_root, activity)
@@ -219,7 +219,128 @@ def preprocess_stairs(trimmed_root, all_data, window_size=3.0, show_plots=True):
         if show_plots:
             plt.show()
         plt.close()
-        #print(f"Saved summary plot to {summary_path}")
+        #print(f"Saved summary plot to {summary_path}")"""
+
+def preprocess_stairs(trimmed_root, all_data, window_size=3.0, show_plots=True, target_folder=None):
+
+    activity = "stairs"
+    out_dir = os.path.join(trimmed_root, activity)
+
+    # Wipe the entire stairs output only if we are processing all folders
+    if target_folder is None:
+        if os.path.isdir(out_dir):
+            shutil.rmtree(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+
+    for folder_name, folder_data in all_data[activity].items():
+        # ✅ Skip all others if target_folder is provided
+        if target_folder and folder_name != target_folder:
+            continue
+
+        print(f"\nProcessing {activity} | Folder: {folder_name}")
+
+        # Normalize time across all CSVs in this folder 
+        for name, df in folder_data.items():
+            if "seconds_elapsed" in df.columns:
+                df["seconds_elapsed"] = df["seconds_elapsed"] - df["seconds_elapsed"].iloc[0]
+
+        # Detect trim using Gravity.csv
+        df_gravity = folder_data["Gravity.csv"]
+
+        time = df_gravity["seconds_elapsed"].values
+        y_values = df_gravity["y"].values
+        sample_rate = len(time) / (time[-1] - time[0])
+        step = int(window_size * sample_rate)
+        stride = int(step * 0.5)
+
+        trim_start, trim_end = detect_trim_bounds_rms_intersection(
+            time,
+            y_values,
+            step,
+            stride,
+            frac_start=0.98,
+            frac_end=0.97,
+            smooth=2,
+            debug=show_plots      # ✅ enable plots for selected folder
+        )
+
+        print(f"{folder_name}: Trim {trim_start:.2f} → {trim_end:.2f}")
+
+        # Plot accelerometer with trim markers
+        df_acc = folder_data["Accelerometer.csv"]
+        plt.figure(figsize=(12, 6))
+        plt.plot(df_acc["seconds_elapsed"], df_acc["x"], label="x", alpha=0.7)
+        plt.plot(df_acc["seconds_elapsed"], df_acc["y"], label="y", alpha=0.7)
+        plt.plot(df_acc["seconds_elapsed"], df_acc["z"], label="z", alpha=0.7)
+
+        plt.axvline(trim_start, color="g", linewidth=2, label=f"Trim start {trim_start:.2f}s")
+        plt.axvline(trim_end, color="r", linewidth=2, label=f"Trim end {trim_end:.2f}s")
+
+        plt.title(f"Accelerometer Trim - {activity} | {folder_name}")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Accelerometer values")
+        plt.legend()
+        plt.tight_layout()
+
+        plot_path = os.path.join(out_dir, f"{folder_name}_accelerometer_trim.png")
+        plt.savefig(plot_path, dpi=150)
+        if show_plots:
+            plt.show()
+        plt.close()
+
+        # (You can keep the rest of the trimming + window slicing code here as it was)
+
+
+def preprocess_running(trimmed_root, all_data, window_size=3.0, show_plots=True, target_folder=None):
+    activity = "running"
+
+    for folder_name, folder_data in all_data[activity].items():
+        # ✅ Skip all other folders if target_folder is given
+        if target_folder and folder_name != target_folder:
+            continue
+
+        out_dir = os.path.join(trimmed_root, activity, folder_name)
+
+        # Remove old processed folder if it exists
+        if os.path.exists(out_dir):
+            print(f"Reprocessing {activity} | Folder: {folder_name} (removing old results)")
+            shutil.rmtree(out_dir)
+        else:
+            print(f"\nProcessing {activity} | Folder: {folder_name}")
+
+        # 1. Single-file (Accelerometer only)
+        df = folder_data["Accelerometer.csv"]
+
+        time = df["seconds_elapsed"].values
+        y_values = df["y"].values
+        sample_rate = len(time) / (time[-1] - time[0])
+        step = int(window_size * sample_rate)
+        stride = int(step * 0.5)  # 50% overlap
+
+        trim_start, trim_end = detect_trim_bounds_rms_intersection(
+            time,
+            y_values,
+            step,
+            stride,
+            frac_start=0.85,
+            frac_end=0.7,
+            smooth=5,
+            debug=show_plots      # ✅ will show plots for the chosen folder
+        )
+
+        n_win, out_dir = process_folder(
+            folder_data,
+            activity,
+            folder_name,
+            trimmed_root,
+            trim_start=trim_start,
+            trim_end=trim_end,
+            window_size=window_size,
+            overlap=0.5
+        )
+
+        print(f"Trim {trim_start:.2f} → {trim_end:.2f}, {n_win} windows, saved in {out_dir}")
+
 
 #////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -355,7 +476,7 @@ def detect_trim_bounds_rms_intersection(time,
                                         frac_start: float = 0.2,   # fraction of peak for start
                                         frac_end: float = 0.2,     # fraction of peak for end
                                         smooth: int = 5,
-                                        debug: bool = False):
+                                        debug: bool = True):
     """
     Detect trim start & end based on RMS intersections with the defined tresholds.
     """
