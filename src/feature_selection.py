@@ -26,7 +26,8 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import VarianceThreshold, SelectKBest, mutual_info_classif
 from sklearn.feature_selection import RFE, SequentialFeatureSelector
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, cross_validate
+from sklearn.metrics import make_scorer, accuracy_score, cohen_kappa_score, f1_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
@@ -149,8 +150,7 @@ def filter_select(
         "stage": "corr_filter",
         "kept": len(kept_ft_corr),
         "removed": len(ft_to_drop),
-        "removed_features": ft_to_drop,
-        "corr_pairs": [{"kept": k, "removed": r, "r": v} for k, r, v in pairs]
+        "removed_features": ft_to_drop
     })
     # 3) Mutual Information K-Best (optional)
     if (k_best is not None) and (y is not None) and (k_best < X_corr.shape[1]):
@@ -175,9 +175,9 @@ def filter_select(
             "removed_features": removed_ft_k
         })
         return X_k, kept_ft_k, pd.DataFrame(report_rows)
-
+    else:
     # If K-Best not applied, return correlation-filtered set
-    return X_corr, kept_ft_corr, pd.DataFrame(report_rows)
+        return X_corr, kept_ft_corr, pd.DataFrame(report_rows)
 
 # -------------------------
 # WRAPPER STAGE (RFE or SFS)
@@ -223,6 +223,13 @@ def wrapper_select(
 
     cv = _cv(n_splits=cv_splits)
 
+    # Multi-metric scorers
+    scorers = {
+        "accuracy": make_scorer(accuracy_score),
+        "kappa": make_scorer(cohen_kappa_score),
+        "f1_macro": make_scorer(f1_score, average="macro"),
+    }
+
     if method == "rfe":
         if not _supports_rfe(est):
             raise ValueError(
@@ -236,44 +243,72 @@ def wrapper_select(
         ranks = getattr(selector, "ranking_", None)
         selected_names = [n for n, s in zip(feature_names, support) if s]
         X_sel = X_proc[:, support]
-        cv_score = cross_val_score(clone(est), X_sel, y, cv=cv, scoring=scoring, n_jobs=-1).mean()
 
-        print(f"[Wrapper-RFE] Method: RFE, Kept: {len(selected_names)} features, CV Score: {cv_score:.4f}")
-        print("Selected features:", selected_names)
+        # Multi-metric CV on the selected subset
+        cv_res = cross_validate(clone(est), X_sel, y, cv=cv, scoring=scorers, n_jobs=-1, return_train_score=False)
+        acc_mean, acc_std = cv_res["test_accuracy"].mean(), cv_res["test_accuracy"].std()
+        kap_mean, kap_std = cv_res["test_kappa"].mean(),    cv_res["test_kappa"].std()
+        f1m_mean, f1m_std = cv_res["test_f1_macro"].mean(), cv_res["test_f1_macro"].std()
+
+        print(f"[Wrapper-RFE] Kept: {len(selected_names)} features")
+        print(f"  Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
+        print(f"  Kappa    : {kap_mean:.4f} ± {kap_std:.4f}")
+        print(f"  F1-macro : {f1m_mean:.4f} ± {f1m_std:.4f}")
+        print("  Selected features:", selected_names)
 
         return X_sel, selected_names, {
             "method": method,
-            "cv_score": cv_score,
+            "cv_scores": {
+                "accuracy_mean": acc_mean, "accuracy_std": acc_std,
+                "kappa_mean": kap_mean,     "kappa_std": kap_std,
+                "f1_macro_mean": f1m_mean,  "f1_macro_std": f1m_std,
+                "raw": cv_res,  # full dict from cross_validate if you want fold-wise values
+            },
             "support_mask": support,
             "ranks": ranks,
             "estimator": est
         }
+    
     else:
         direction = "forward" if method == "sfs_forward" else "backward"
         sfs = SequentialFeatureSelector(
             est,
             n_features_to_select=n_features_to_select,
             direction=direction,
-            scoring=scoring,
+            scoring="accuracy",
             cv=cv,
             n_jobs=-1
         )
         sfs.fit(X_proc, y)
+
         support = sfs.get_support()
         selected_names = [n for n, s in zip(feature_names, support) if s]
         X_sel = X_proc[:, support]
-        cv_score = cross_val_score(clone(est), X_sel, y, cv=cv, scoring=scoring, n_jobs=-1).mean()
 
-        print(f"[Wrapper-SFS] Method: {direction}, Kept: {len(selected_names)} features, CV Score: {cv_score:.4f}")
-        print("Selected features:", selected_names)
+         # Multi-metric CV on the selected subset
+        cv_res = cross_validate(clone(est), X_sel, y, cv=cv, scoring=scorers, n_jobs=-1, return_train_score=False)
+
+        acc_mean, acc_std = cv_res["test_accuracy"].mean(), cv_res["test_accuracy"].std()
+        f1m_mean, f1m_std = cv_res["test_f1_macro"].mean(), cv_res["test_f1_macro"].std()
+        kap_mean, kap_std = cv_res["test_kappa"].mean(),    cv_res["test_kappa"].std()
+
+        print(f"[Wrapper-SFS:{direction}] Kept: {len(selected_names)} features")
+        print(f"  Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
+        print(f"  F1-macro : {f1m_mean:.4f} ± {f1m_std:.4f}")
+        print(f"  Kappa    : {kap_mean:.4f} ± {kap_std:.4f}")
+        print("  Selected features:", selected_names)
 
         return X_sel, selected_names, {
             "method": method,
-            "cv_score": cv_score,
+            "cv_scores": {
+                "accuracy_mean": acc_mean, "accuracy_std": acc_std,
+                "f1_macro_mean": f1m_mean, "f1_macro_std": f1m_std,
+                "kappa_mean": kap_mean,    "kappa_std": kap_std,
+                "raw": cv_res,
+            },
             "support_mask": support,
             "estimator": est
         }
-
 # -------------------------
 # Visualization & Selection Aids
 # -------------------------
@@ -355,48 +390,6 @@ def accuracy_vs_k_MI(
     plt.close()
 
     return k_list, acc_list
-
-# -------------------------
-# PCA variance helper (optional)
-# -------------------------
-
-def pca_explained_variance(
-    X,
-    scale_inputs=True,
-    n_components=None,
-    show_plot=True,
-    block=False,
-    save_path=None
-):
-    """
-    Plot cumulative explained variance from PCA (classification-agnostic).
-    Use to decide how many PCA components to keep in PCA-based pipelines.
-    """
-    if isinstance(X, pd.DataFrame):
-        X_mat = X.values
-    else:
-        X_mat = np.asarray(X)
-
-    X_proc = StandardScaler().fit_transform(X_mat) if scale_inputs else X_mat
-    pca = PCA(n_components=n_components, random_state=42)
-    pca.fit(X_proc)
-    evr = pca.explained_variance_ratio_
-    cum = np.cumsum(evr)
-
-    if show_plot or save_path is not None:
-        plt.figure(figsize=(6,4))
-        plt.plot(np.arange(1, len(cum)+1), cum, marker='o')
-        plt.xlabel("Number of PCA components")
-        plt.ylabel("Cumulative explained variance")
-        plt.title("PCA cumulative explained variance")
-        plt.grid(True, linestyle="--", linewidth=0.5)
-        if save_path is not None:
-            plt.savefig(save_path, bbox_inches="tight", dpi=150)
-        if show_plot:
-            plt.show(block=block)
-        plt.close()
-
-    return evr, cum, pca
 
 # -------------------------
 # Example usage (uncomment and adapt to your data)
