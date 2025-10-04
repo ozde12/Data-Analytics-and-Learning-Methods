@@ -549,13 +549,3 @@ if __name__ == "__main__":
     #     estimator=LogisticRegression(max_iter=2000, solver="lbfgs"),
     #     show=True, block=False, save_path="figures/mi_k_curve.png"
     # )
-
-    # Optional: PCA variance curve (if you also explore PCA-based approach)
-    evr, cum, pca = pca_explained_variance(
-        X,
-        scale_inputs=True,
-        n_components=None,
-        show_plot=True,
-        block=False,
-        save_path="figures/pca_variance.png"
-    )
