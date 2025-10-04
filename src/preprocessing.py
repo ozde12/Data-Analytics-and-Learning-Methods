@@ -53,6 +53,47 @@ def preprocess_running(trimmed_root, all_data, window_size=3.0, show_plots=True)
 
         print(f"  Trim {trim_start:.2f} → {trim_end:.2f}, {n_win} windows, saved in {out_dir}")
 
+        # Trimmed accelerometer data within trim_start and trim_end
+        df_acc = df[(df["seconds_elapsed"] >= trim_start) &
+                    (df["seconds_elapsed"] <= trim_end)]
+
+        acc_time = df_acc["seconds_elapsed"].values
+        start_idx = np.searchsorted(acc_time, trim_start)
+        end_idx   = np.searchsorted(acc_time, trim_end)
+
+        window_ranges = []
+        for i, start in enumerate(range(start_idx, end_idx - step + 1, stride)):
+            end = start + step
+            win_start = df_acc.iloc[start]["seconds_elapsed"]
+            win_end   = df_acc.iloc[end-1]["seconds_elapsed"]
+            window_ranges.append((win_start, win_end))
+
+        # Plot accelerometer signals with shaded windows
+        plt.figure(figsize=(12, 6))
+        plt.plot(df["seconds_elapsed"], df["x"], label="x", alpha=0.7)
+        plt.plot(df["seconds_elapsed"], df["y"], label="y", alpha=0.7)
+        plt.plot(df["seconds_elapsed"], df["z"], label="z", alpha=0.7)
+
+        plt.axvline(trim_start, color="red", linestyle="--", label=f"Trim start {trim_start:.2f}s")
+        plt.axvline(trim_end, color="blue", linestyle="--", label=f"Trim end {trim_end:.2f}s")
+
+        for win_start, win_end in window_ranges:
+            plt.axvspan(win_start, win_end, color="gray", alpha=0.15)
+
+        plt.title(f"{activity} - {folder_name} - Accelerometer (Trim + {window_size:.0f}s windows, 50% overlap)")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Acceleration [m/s²]")
+        plt.legend()
+        plt.tight_layout()
+
+        summary_path = os.path.join(out_dir, f"{folder_name}_summary_plot.png")
+        plt.savefig(summary_path, dpi=150)
+        if show_plots:
+            plt.show()
+        plt.close()
+
+        
+
 
 def preprocess_walking(trimmed_root, all_data, window_size=3.0, show_plots=True):
     activity = "walking"
@@ -95,6 +136,46 @@ def preprocess_walking(trimmed_root, all_data, window_size=3.0, show_plots=True)
                                         overlap=0.5)
         
         print(f"  Trim {trim_start:.2f} → {trim_end:.2f}, {n_win} windows, saved in {out_dir}")
+
+        # Trimmed accelerometer data within trim_start and trim_end
+        df_acc = df[(df["seconds_elapsed"] >= trim_start) &
+                    (df["seconds_elapsed"] <= trim_end)]
+
+        acc_time = df_acc["seconds_elapsed"].values
+        start_idx = np.searchsorted(acc_time, trim_start)
+        end_idx   = np.searchsorted(acc_time, trim_end)
+
+        window_ranges = []
+        for i, start in enumerate(range(start_idx, end_idx - step + 1, stride)):
+            end = start + step
+            win_start = df_acc.iloc[start]["seconds_elapsed"]
+            win_end   = df_acc.iloc[end-1]["seconds_elapsed"]
+            window_ranges.append((win_start, win_end))
+
+        # Plot accelerometer signals with shaded windows
+        plt.figure(figsize=(12, 6))
+        plt.plot(df["seconds_elapsed"], df["x"], label="x", alpha=0.7)
+        plt.plot(df["seconds_elapsed"], df["y"], label="y", alpha=0.7)
+        plt.plot(df["seconds_elapsed"], df["z"], label="z", alpha=0.7)
+
+        plt.axvline(trim_start, color="red", linestyle="--", label=f"Trim start {trim_start:.2f}s")
+        plt.axvline(trim_end, color="blue", linestyle="--", label=f"Trim end {trim_end:.2f}s")
+
+        for win_start, win_end in window_ranges:
+            plt.axvspan(win_start, win_end, color="gray", alpha=0.15)
+
+        plt.title(f"{activity} - {folder_name} - Accelerometer (Trim + {window_size:.0f}s windows, 50% overlap)")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Acceleration [m/s²]")
+        plt.legend()
+        plt.tight_layout()
+
+        summary_path = os.path.join(out_dir, f"{folder_name}_summary_plot.png")
+        plt.savefig(summary_path, dpi=150)
+        if show_plots:
+            plt.show()
+        plt.close()
+
 
 
 def preprocess_stairs(trimmed_root, all_data, window_size=3.0, show_plots=True):
@@ -354,7 +435,7 @@ def detect_trim_bounds_rms_intersection(time,
                                         frac_start: float = 0.2,   # fraction of peak for start
                                         frac_end: float = 0.2,     # fraction of peak for end
                                         smooth: int = 5,
-                                        debug: bool = True):
+                                        debug: bool = False):
     """
     Detect trim start & end based on RMS intersections with the defined tresholds.
     """
