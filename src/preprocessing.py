@@ -759,16 +759,19 @@ def stratified_person_label_split(
     X: pd.DataFrame,
     y: pd.Series | pd.DataFrame,
     test_ratio: float = 0.20,
-    random_state: int = 42):
+    random_state: int = 42
+):
     """
-    Split X, y into train/test with stratification by the joint (person, label) buckets.
+    Balance classes by downsampling each activity to the minimum class size,
+    removing samples from the (person, label) buckets with the highest counts first.
+    Then split X, y into train/test with stratification by the joint (person, label) buckets.
 
     Assumptions
     -----------
     - X is a DataFrame whose last column contains the person name as a string (e.g., "liya").
     - y is a Series or a single-column DataFrame with the class labels.
     - We DO NOT enforce "person isolation" (i.e., the same person may appear in both splits).
-    We simply preserve the distribution across (person, label) buckets.
+      We simply preserve the distribution across (person, label) buckets.
 
     Parameters
     ----------
@@ -784,10 +787,10 @@ def stratified_person_label_split(
     Returns
     -------
     X_train, y_train, X_test, y_test, info
-        - Train/Test splits preserving (person, label) proportions.
-        - info: dict with sizes/ratios and per-class/per-person distributions.
+        - Train/Test splits preserving (person, label) proportions on the **balanced** dataset.
+        - info: dict with sizes/ratios and per-class/per-person distributions, including pre/post-balance summaries.
     """
-    # Normalize y to a 1D array for internal processing, but keep original object for return
+    # ---- Normalize y to a 1D array for internal processing, but keep original object for return
     if isinstance(y, pd.DataFrame):
         if y.shape[1] != 1:
             raise ValueError("y DataFrame must have exactly one column.")
@@ -798,30 +801,128 @@ def stratified_person_label_split(
     if X.shape[0] != len(y_1d):
         raise ValueError("X and y must have the same number of rows.")
 
-    # Person names: last column of X
+    # ---- Person names: last column of X
     person_col = X.columns[-1]
     persons = X[person_col].astype(str).values
 
     rng = np.random.RandomState(random_state)
-    n_total = len(X)
+    n_total_original = len(X)
 
-    # Build (person, label) -> list of row indices
-    buckets: dict[tuple[str, Any], list[int]] = defaultdict(list)
+    # =========================
+    # 1) BALANCE BY CLASS SIZE
+    # =========================
+    # Compute class counts (pre-balance)
+    class_counts = pd.Series(y_1d).value_counts().sort_index()
+    min_class_size = int(class_counts.min())
+
+    print("=== Pre-balance class counts ===")
+    for lbl, cnt in class_counts.items():
+        print(f"  Class {lbl}: {cnt} samples")
+    print(f"--> Target per-class size (minimum across classes): {min_class_size}\n")
+
+    # Build mapping: label -> { person -> [indices] }
+    per_label_person_indices: dict[Any, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     for i, (p, label) in enumerate(zip(persons, y_1d)):
+        per_label_person_indices[label][p].append(i)
+
+    # Shuffle indices within each (label, person) bucket for randomness
+    for label, per_person in per_label_person_indices.items():
+        for p, idxs in per_person.items():
+            idxs_arr = np.array(idxs, dtype=int)
+            rng.shuffle(idxs_arr)
+            per_person[p] = idxs_arr.tolist()
+
+    # For each label, trim to min_class_size by removing from the person with most remaining samples
+    kept_indices = []
+    per_label_person_before = {}
+    per_label_person_after = {}
+
+    for label, per_person in per_label_person_indices.items():
+        persons_list = list(per_person.keys())
+        counts = np.array([len(per_person[p]) for p in persons_list], dtype=int)
+        per_label_person_before[label] = dict(zip(persons_list, counts.tolist()))
+
+        total = int(counts.sum())
+        target = min_class_size
+
+        if total <= target:
+            # Already at or below target -> keep all
+            keep_counts = counts.copy()
+        else:
+            # Greedy reduction: remove from the person with the largest current count
+            keep_counts = counts.copy()
+            # To break ties randomly, we'll add a tiny random jitter to priorities per iteration
+            # but we only use it at selection time.
+            to_remove = total - target
+            while to_remove > 0:
+                # Argmax with random tie-breaking
+                # We add small random noise; it's okay since counts are integers.
+                noise = rng.rand(len(keep_counts)) * 1e-6
+                idx_max = int(np.argmax(keep_counts + noise))
+                if keep_counts[idx_max] > 0:
+                    keep_counts[idx_max] -= 1
+                    to_remove -= 1
+                else:
+                    # In the unlikely case a bucket is already zero, continue
+                    # (loop will eventually finish since some bucket must be > 0 if to_remove > 0)
+                    pass
+
+        # Select the first keep_counts[p] samples from each person's shuffled list
+        for p, k in zip(persons_list, keep_counts.tolist()):
+            kept_indices.extend(per_person[p][:k])
+
+        per_label_person_after[label] = dict(zip(persons_list, keep_counts.tolist()))
+
+        # ---- Verification prints per class
+        print(f"Class {label}:")
+        print("  Person counts BEFORE:", per_label_person_before[label])
+        print("  Person counts AFTER: ", per_label_person_after[label])
+        print(f"  -> Kept total for class {label}: {sum(keep_counts)} (target {target})\n")
+
+    kept_indices = np.array(sorted(kept_indices), dtype=int)
+
+    # Subset X and y to the balanced selection
+    Xb = X.iloc[kept_indices].reset_index(drop=True)
+    if isinstance(y, pd.DataFrame):
+        yb = y.iloc[kept_indices].reset_index(drop=True)
+        yb_1d = yb.iloc[:, 0].values
+    else:
+        yb = y.iloc[kept_indices].reset_index(drop=True)
+        yb_1d = yb.values
+
+    persons_b = Xb[person_col].astype(str).values
+
+    # Post-balance class counts
+    class_counts_after = pd.Series(yb_1d).value_counts().sort_index()
+    print("=== Post-balance class counts (should all equal the minimum) ===")
+    for lbl, cnt in class_counts_after.items():
+        print(f"  Class {lbl}: {cnt} samples")
+    print(f"Total kept after balancing: {len(Xb)} / {n_total_original}\n")
+
+    # ==========================================================
+    # 2) STRATIFIED SPLIT BY JOINT (PERSON, LABEL) ON BALANCED SET
+    # ==========================================================
+    # Build (person, label) -> list of row indices (w.r.t. Xb/yb)
+    buckets: dict[tuple[str, Any], list[int]] = defaultdict(list)
+    for i, (p, label) in enumerate(zip(persons_b, yb_1d)):
         buckets[(p, label)].append(i)
+
+    rng = np.random.RandomState(random_state)  # re-seed for split reproducibility
+    n_total = len(Xb)
 
     # Allocate indices per bucket
     train_idx: list[int] = []
     test_idx:  list[int] = []
 
     for (p, label), idx_list in buckets.items():
-        idx = np.array(idx_list)
+        idx = np.array(idx_list, dtype=int)
         rng.shuffle(idx)
 
         n = len(idx)
         n_train = int(round((1.0 - test_ratio) * n))
         # guardrails to avoid empty splits if bucket is tiny
         n_train = min(max(n_train, 0), n)
+        # Ensure at least one sample goes to test if bucket has >= 1 and test_ratio > 0
         n_test = n - n_train
 
         train_idx.extend(idx[:n_train].tolist())
@@ -833,41 +934,58 @@ def stratified_person_label_split(
     rng.shuffle(train_idx)
     rng.shuffle(test_idx)
 
-    # Build splits
-    X_train = X.iloc[train_idx]
-    X_test  = X.iloc[test_idx]
+    # Build splits from balanced data
+    X_train = Xb.iloc[train_idx]
+    X_test  = Xb.iloc[test_idx]
 
     # Preserve y's original type
-    if isinstance(y, pd.DataFrame):
-        y_train = y.iloc[train_idx]
-        y_test  = y.iloc[test_idx]
+    if isinstance(yb, pd.DataFrame):
+        y_train = yb.iloc[train_idx]
+        y_test  = yb.iloc[test_idx]
     else:
-        y_train = y.iloc[train_idx]
-        y_test  = y.iloc[test_idx]
+        y_train = yb.iloc[train_idx]
+        y_test  = yb.iloc[test_idx]
 
-    # ---- Info report
+    # ---- Verification prints for split
     def _counts(arr):
         return pd.Series(arr).value_counts().sort_index().to_dict()
 
+    print("=== Split verification on BALANCED dataset ===")
+    print(f"Sizes -> Train: {len(train_idx)}, Test: {len(test_idx)}, Total: {n_total}")
+    print("Class dist -> Train:", _counts(np.asarray(yb_1d)[train_idx]))
+    print("Class dist -> Test: ", _counts(np.asarray(yb_1d)[test_idx]))
+    print("Person dist -> Train:", _counts(np.asarray(persons_b)[train_idx]))
+    print("Person dist -> Test: ", _counts(np.asarray(persons_b)[test_idx]))
+    print()
+
+    # ---- Info report (includes pre/post balance)
     info = {
+        "balance": {
+            "pre_balance_class_counts": class_counts.to_dict(),
+            "post_balance_class_counts": class_counts_after.to_dict(),
+            "target_per_class": min_class_size,
+            "per_label_person_before": per_label_person_before,
+            "per_label_person_after": per_label_person_after,
+        },
         "sizes": {
             "train": len(train_idx),
             "test":  len(test_idx),
             "total": n_total,
+            "original_total": n_total_original,
         },
         "ratios": {
-            "train": len(train_idx) / n_total,
-            "test":  len(test_idx) / n_total,
+            "train": len(train_idx) / n_total if n_total > 0 else 0.0,
+            "test":  len(test_idx) / n_total if n_total > 0 else 0.0,
         },
         "class_dist": {
-            "train": _counts(np.asarray(y_1d)[train_idx]),
-            "test":  _counts(np.asarray(y_1d)[test_idx]),
+            "train": _counts(np.asarray(yb_1d)[train_idx]),
+            "test":  _counts(np.asarray(yb_1d)[test_idx]),
         },
         "person_dist": {
-            "train": _counts(np.asarray(persons)[train_idx]),
-            "test":  _counts(np.asarray(persons)[test_idx]),
+            "train": _counts(np.asarray(persons_b)[train_idx]),
+            "test":  _counts(np.asarray(persons_b)[test_idx]),
         },
-        "stratified_on": "joint (person, label) buckets",
+        "stratified_on": "joint (person, label) buckets AFTER class balancing",
         "person_column": person_col,
     }
 
