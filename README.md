@@ -17,7 +17,7 @@ project_root/
 ├── group32_activity_recognition.ipynb    # Main notebook
 ├── group32_Report.pdf
 ├── README.md
-├── environment.yml                       # project dependencies
+├── requirements.txt                       # project dependencies
 └── dataset.csv
 ```
 
@@ -34,7 +34,10 @@ project_root/
 2. **Install Dependencies**
    - Make sure you create a conda environment and install the required libraries:
      ```bash
-     conda env create -f environment.yml
+    conda create -n .venv python=3.12 pip
+    conda activate .venv
+    pip install -r requirements.txt
+
      ```
 
 3. **Run the Notebook**
