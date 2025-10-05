@@ -54,16 +54,33 @@ def _default_estimator():
     """Default estimator for wrapper selection (works with RFE)."""
     return LogisticRegression(max_iter=2000, solver="lbfgs", random_state=42)
 
+def _importance_from_estimator(estimator):
+    """Return a 1D array of importances for the fitted estimator.
+    - If coef_ present: use mean of abs coefs across classes.
+    - If feature_importances_ present: use it directly.
+    """
+    if hasattr(estimator, "coef_"):
+        coef = getattr(estimator, "coef_")
+        coef = np.asarray(coef)
+        if coef.ndim == 1:
+            imp = np.abs(coef)
+        else:
+            # multiclass: average |coef| across classes
+            imp = np.mean(np.abs(coef), axis=0)
+        return np.ravel(imp)
+    if hasattr(estimator, "feature_importances_"):
+        return np.ravel(getattr(estimator, "feature_importances_"))
+    raise ValueError(
+        "Estimator must expose coef_ or feature_importances_ for RFE-style elimination."
+    )
 
-def _supports_rfe(estimator):
-    """Check if estimator can be used with RFE (needs coef_ or feature_importances_)."""
-    try:
-        X_tmp = np.array([[0., 0.], [1., 1.], [0., 1.], [1., 0.]])
-        y_tmp = np.array([0, 1, 0, 1])
-        est_fit = clone(estimator).fit(X_tmp, y_tmp)
-        return hasattr(est_fit, "coef_") or hasattr(est_fit, "feature_importances_")
-    except Exception:
-        return False
+def _multi_metric_scorers():
+    return {
+        "accuracy": make_scorer(accuracy_score),
+        "kappa": make_scorer(cohen_kappa_score),
+        "f1_macro": make_scorer(f1_score, average="macro"),
+    }
+
 
 # -------------------------
 # FILTER STAGE (variance -> correlation -> MI-KBest)
@@ -178,30 +195,55 @@ def filter_select(
     else:
     # If K-Best not applied, return correlation-filtered set
         return X_corr, kept_ft_corr, pd.DataFrame(report_rows)
-
+    
 # -------------------------
-# WRAPPER STAGE (RFE or SFS)
+# WRAPPER STAGE 
 # -------------------------
 
 def wrapper_select(
     X,
     y,
-    method="rfe",               # "rfe", "sfs_forward", "sfs_backward"
-    n_features_to_select=None,   # int
-    estimator=None,              # e.g., LogisticRegression(), DecisionTreeClassifier(), KNeighborsClassifier(), GaussianNB()
+    method="rfe",                # "rfe", "sfs_forward", "sfs_backward" (backward maps to rfe)
+    n_features_to_start=None,     # starting subset size for RFE (defaults to p)
+    estimator=None,               # sklearn estimator
     cv_splits=5,
-    scoring=None,
-    scale_inputs=True
+    choose_by="accuracy",        # which metric to use to pick best step: "accuracy" | "kappa" | "f1_macro"
+    scale_inputs=True,
+    verbose=True,
 ):
     """
-    Wrapper feature selection for classification using:
-      - RFE (requires estimator with coef_ or feature_importances_)
-      - SFS forward/backward (works with any estimator)
+    Wrapper feature selection with *full sweep* and per-step metrics.
 
-    Returns:
-      X_selected (ndarray), selected_names (list), info dict
+    Changes vs. your previous version:
+      • RFE: keeps eliminating ONE feature at a time starting from `n_features_to_start` (or all features if None)
+        down to 1. At each step prints which feature was eliminated and CV metrics. Finally prints the
+        BEST step (by `choose_by`) and how many features it used.
+      • SFS (forward): starts with 1 feature and adds one at a time until all features are included.
+        Prints which feature is added at each step and the CV metrics after that addition. Chooses the
+        BEST step (by `choose_by`).
+      • Return signature: (selected_feature_names, info_dict) — no X matrix is returned.
+      • `info_dict` includes full `history` for plotting: per-step k, feature set, action, means/stds, etc.
+
+    Parameters
+    ----------
+    X : array-like or DataFrame
+    y : array-like
+    method : {"rfe", "sfs_forward", "sfs_backward"}
+        Note: "sfs_backward" is treated like RFE elimination.
+    n_features_to_start : int or None
+        RFE only. If None, starts from all features (p). If provided, starts from this size (must be 2..p).
+    estimator : sklearn estimator
+    cv_splits : int
+    choose_by : str
+        Metric used to pick best step from history: one of keys in _multi_metric_scorers().
+    scale_inputs : bool
+    verbose : bool
+
+    Returns
+    -------
+    selected_names : list[str]
+    info : dict with keys {"method", "best", "history", "cv", "choose_by"}
     """
-    # Always use DataFrame column labels if available
     if isinstance(X, pd.DataFrame):
         feature_names = list(X.columns)
         X_mat = X.values
@@ -209,12 +251,10 @@ def wrapper_select(
         X_mat = np.asarray(X)
         feature_names = [f"f{i}" for i in range(X_mat.shape[1])]
 
-    # Choose estimator
     if estimator is None:
-        estimator = _default_estimator()
-    est = clone(estimator)
+        raise ValueError("Please provide an estimator (e.g., LogisticRegression(), DecisionTreeClassifier(), ...)")
 
-    # Optional scaling (recommended for LR/KNN; harmless for trees)
+    # Preprocess
     if scale_inputs:
         scaler = StandardScaler()
         X_proc = scaler.fit_transform(X_mat)
@@ -222,93 +262,175 @@ def wrapper_select(
         X_proc = X_mat
 
     cv = _cv(n_splits=cv_splits)
+    scorers = _multi_metric_scorers()
+    if choose_by not in scorers:
+        raise ValueError(f"choose_by must be one of {list(scorers.keys())}")
 
-    # Multi-metric scorers
-    scorers = {
-        "accuracy": make_scorer(accuracy_score),
-        "kappa": make_scorer(cohen_kappa_score),
-        "f1_macro": make_scorer(f1_score, average="macro"),
-    }
-
-    if method == "rfe":
-        if not _supports_rfe(est):
-            raise ValueError(
-                "RFE requires an estimator with coef_ or feature_importances_. "
-                "Use LogisticRegression / DecisionTree / RandomForest, or switch to SFS."
-            )
-        n_keep = n_features_to_select if n_features_to_select is not None else max(1, X_proc.shape[1] // 2)
-        selector = RFE(estimator=est, n_features_to_select=n_keep, step=1)
-        selector.fit(X_proc, y)
-        support = selector.get_support()
-        ranks = getattr(selector, "ranking_", None)
-        selected_names = [n for n, s in zip(feature_names, support) if s]
-        X_sel = X_proc[:, support]
-
-        # Multi-metric CV on the selected subset
-        cv_res = cross_validate(clone(est), X_sel, y, cv=cv, scoring=scorers, n_jobs=-1, return_train_score=False)
-        acc_mean, acc_std = cv_res["test_accuracy"].mean(), cv_res["test_accuracy"].std()
-        kap_mean, kap_std = cv_res["test_kappa"].mean(),    cv_res["test_kappa"].std()
-        f1m_mean, f1m_std = cv_res["test_f1_macro"].mean(), cv_res["test_f1_macro"].std()
-
-        print(f"[Wrapper-RFE] Kept: {len(selected_names)} features")
-        print(f"  Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
-        print(f"  Kappa    : {kap_mean:.4f} ± {kap_std:.4f}")
-        print(f"  F1-macro : {f1m_mean:.4f} ± {f1m_std:.4f}")
-        print("  Selected features:", selected_names)
-
-        return X_sel, selected_names, {
-            "method": method,
-            "cv_scores": {
-                "accuracy_mean": acc_mean, "accuracy_std": acc_std,
-                "kappa_mean": kap_mean,     "kappa_std": kap_std,
-                "f1_macro_mean": f1m_mean,  "f1_macro_std": f1m_std,
-                "raw": cv_res,  # full dict from cross_validate if you want fold-wise values
-            },
-            "support_mask": support,
-            "ranks": ranks,
-            "estimator": est
-        }
-    
-    else:
-        direction = "forward" if method == "sfs_forward" else "backward"
-        sfs = SequentialFeatureSelector(
-            est,
-            n_features_to_select=n_features_to_select,
-            direction=direction,
-            scoring="accuracy",
-            cv=cv,
-            n_jobs=-1
+    def _cv_multi(X_sub):
+        res = cross_validate(
+            clone(estimator), X_sub, y, cv=cv, scoring=scorers, n_jobs=-1, return_train_score=False
         )
-        sfs.fit(X_proc, y)
-
-        support = sfs.get_support()
-        selected_names = [n for n, s in zip(feature_names, support) if s]
-        X_sel = X_proc[:, support]
-
-         # Multi-metric CV on the selected subset
-        cv_res = cross_validate(clone(est), X_sel, y, cv=cv, scoring=scorers, n_jobs=-1, return_train_score=False)
-
-        acc_mean, acc_std = cv_res["test_accuracy"].mean(), cv_res["test_accuracy"].std()
-        f1m_mean, f1m_std = cv_res["test_f1_macro"].mean(), cv_res["test_f1_macro"].std()
-        kap_mean, kap_std = cv_res["test_kappa"].mean(),    cv_res["test_kappa"].std()
-
-        print(f"[Wrapper-SFS:{direction}] Kept: {len(selected_names)} features")
-        print(f"  Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
-        print(f"  F1-macro : {f1m_mean:.4f} ± {f1m_std:.4f}")
-        print(f"  Kappa    : {kap_mean:.4f} ± {kap_std:.4f}")
-        print("  Selected features:", selected_names)
-
-        return X_sel, selected_names, {
-            "method": method,
-            "cv_scores": {
-                "accuracy_mean": acc_mean, "accuracy_std": acc_std,
-                "f1_macro_mean": f1m_mean, "f1_macro_std": f1m_std,
-                "kappa_mean": kap_mean,    "kappa_std": kap_std,
-                "raw": cv_res,
-            },
-            "support_mask": support,
-            "estimator": est
+        out = {
+            k.replace("test_", ""): (np.mean(v), np.std(v))
+            for k, v in res.items() if k.startswith("test_")
         }
+        out["raw"] = res
+        return out
+
+    history = []  # each item: {k, features, action, changed_feature, metrics:{metric:(mean,std)}}
+
+    if method in ("rfe", "sfs_backward"):
+        # --- RFE-like: greedy one-by-one elimination using model importances ---
+        p = X_proc.shape[1]
+        start_k = n_features_to_start if n_features_to_start is not None else p
+        if not (1 < start_k <= p):
+            raise ValueError(f"n_features_to_start must be in [2, {p}] for RFE. Got {start_k}.")
+
+        current_idx = list(range(p))
+        current_names = [feature_names[i] for i in current_idx]
+
+        # Evaluate the starting subset first (size=start_k)
+        # If start_k < p, select a starting subset via a quick importance ranking from the full model
+        if start_k < p:
+            est0 = clone(estimator)
+            est0.fit(X_proc[:, current_idx], y)
+            try:
+                imps = _importance_from_estimator(est0)
+            except Exception as e:
+                raise ValueError(
+                    "RFE requires estimator with coef_ or feature_importances_."
+                ) from e
+            # keep top start_k by importance
+            order = np.argsort(imps)[::-1]
+            current_idx = [current_idx[i] for i in order[:start_k]]
+            current_names = [feature_names[i] for i in current_idx]
+
+        # compute metrics at the starting subset
+        metrics = _cv_multi(X_proc[:, current_idx])
+        if verbose:
+            m = metrics
+            print(f"[RFE] k={len(current_idx)} start | Acc {m['accuracy'][0]:.4f} | F1m {m['f1_macro'][0]:.4f} | Kappa {m['kappa'][0]:.4f}")
+        history.append({
+            "k": len(current_idx),
+            "features": current_names.copy(),
+            "action": "start",
+            "changed_feature": None,
+            "metrics": metrics,
+        })
+
+        # keep eliminating down to 1 feature
+        while len(current_idx) > 1:
+            # fit model and get importances on current subset
+            est = clone(estimator).fit(X_proc[:, current_idx], y)
+            imps = _importance_from_estimator(est)
+            # eliminate the least important
+            drop_local = int(np.argmin(imps))
+            drop_global = current_idx[drop_local]
+            drop_name = feature_names[drop_global]
+            # update subset
+            del current_idx[drop_local]
+            current_names = [feature_names[i] for i in current_idx]
+            # evaluate
+            metrics = _cv_multi(X_proc[:, current_idx])
+            if verbose:
+                m = metrics
+                print(f"[RFE] eliminated: {drop_name} | k={len(current_idx)} | Acc {m['accuracy'][0]:.4f} | F1m {m['f1_macro'][0]:.4f} | Kappa {m['kappa'][0]:.4f}")
+            history.append({
+                "k": len(current_idx),
+                "features": current_names.copy(),
+                "action": "eliminate",
+                "changed_feature": drop_name,
+                "metrics": metrics,
+            })
+
+        # choose best step
+        best_ix = int(np.argmax([step["metrics"][choose_by][0] for step in history]))
+        best = history[best_ix]
+        best_names = best["features"]
+        if verbose:
+            m = best["metrics"]
+            print(f"[Wrapper-RFE] Kept: {best['k']} features")
+            print(f"  Accuracy : {m['accuracy'][0]:.4f} ± {m['accuracy'][1]:.4f}")
+            print(f"  Kappa    : {m['kappa'][0]:.4f} ± {m['kappa'][1]:.4f}")
+            print(f"  F1-macro : {m['f1_macro'][0]:.4f} ± {m['f1_macro'][1]:.4f}")
+            print(f"  Selected features: {best_names}")
+        info = {
+            "method": "rfe",
+            "choose_by": choose_by,
+            "best": {
+                "k": best["k"],
+                "features": best_names,
+                "metrics": best["metrics"],
+                "history_index": best_ix,
+            },
+            "history": history,
+            "cv": {
+                "splits": cv_splits,
+            },
+        }
+        return best_names, info
+
+    elif method == "sfs_forward":
+        # --- Greedy forward selection, add one feature per step ---
+        p = X_proc.shape[1]
+        remaining = list(range(p))
+        selected = []
+        # build up from 1 to p features
+        while remaining:
+            # try adding each candidate, pick the one maximizing choose_by
+            scores = []
+            for j in remaining:
+                idx_try = selected + [j]
+                metrics = _cv_multi(X_proc[:, idx_try])
+                scores.append((metrics[choose_by][0], j, metrics))
+            scores.sort(reverse=True, key=lambda t: t[0])
+            best_score, best_j, best_metrics = scores[0]
+            # commit the best addition
+            remaining.remove(best_j)
+            selected.append(best_j)
+            names_now = [feature_names[i] for i in selected]
+            if verbose:
+                m = best_metrics
+                print(f"[SFS:forward] added: {feature_names[best_j]} | k={len(selected)} | Acc {m['accuracy'][0]:.4f} | F1m {m['f1_macro'][0]:.4f} | Kappa {m['kappa'][0]:.4f}")
+            history.append({
+                "k": len(selected),
+                "features": names_now.copy(),
+                "action": "add",
+                "changed_feature": feature_names[best_j],
+                "metrics": best_metrics,
+            })
+
+        # choose best step (can be any k from 1..p)
+        best_ix = int(np.argmax([step["metrics"][choose_by][0] for step in history]))
+        best = history[best_ix]
+        best_names = best["features"]
+        if verbose:
+            m = best["metrics"]
+            print(f"[Wrapper-SFS] Kept: {best['k']} features")
+            print(f"  Accuracy : {m['accuracy'][0]:.4f} ± {m['accuracy'][1]:.4f}")
+            print(f"  Kappa    : {m['kappa'][0]:.4f} ± {m['kappa'][1]:.4f}")
+            print(f"  F1-macro : {m['f1_macro'][0]:.4f} ± {m['f1_macro'][1]:.4f}")
+            print(f"  Selected features: {best_names}")
+        info = {
+            "method": "sfs_forward",
+            "choose_by": choose_by,
+            "best": {
+                "k": best["k"],
+                "features": best_names,
+                "metrics": best["metrics"],
+                "history_index": best_ix,
+            },
+            "history": history,
+            "cv": {
+                "splits": cv_splits,
+            },
+        }
+        return best_names, info
+
+    else:
+        raise ValueError("Unknown method. Use 'rfe' or 'sfs_forward'.")
+
+
 # -------------------------
 # Visualization & Selection Aids
 # -------------------------
